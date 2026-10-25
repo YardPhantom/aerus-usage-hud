@@ -9,8 +9,8 @@
   },
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/usage.test.js test/compatibility.test.js test/model-proportion.test.js",
-    "check": "node --check server.js && node --check src/util.js && node --check src/pricing.js && node --check src/codex.js && node --check src/claude.js && node --check src/aggregate.js && node --check src/codex-account.js && node --check src/local-ollama.js && node --check src/totals.js && node --check src/account-store.js && node --check public/app.js && node --check scripts/audit-package.mjs && npm test",
+    "test": "node --test test/usage.test.js test/compatibility.test.js test/model-proportion.test.js test/ecosystem.test.js",
+    "check": "node --check server.js && node --check src/util.js && node --check src/pricing.js && node --check src/codex.js && node --check src/claude.js && node --check src/ecosystem.js && node --check src/aggregate.js && node --check src/codex-account.js && node --check src/local-ollama.js && node --check src/totals.js && node --check src/account-store.js && node --check public/app.js && node --check scripts/audit-package.mjs && npm test",
     "audit": "node scripts/audit-package.mjs"
   },
   "license": "MIT",

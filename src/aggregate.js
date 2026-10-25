@@ -1,11 +1,12 @@
 // Turns usage events into the view the dashboard draws.
 // Every event has: provider ('codex' | 'claude' | 'ollama'), at (epoch ms), sessionId, project, model,
 // input, output, cacheRead, cacheWrite, total, cost, and optionally cacheKnown (false when cache is not recorded).
-import { modelBreakdown, projectBreakdown } from './models.js';
+import { modelBreakdown, projectBreakdown, appBreakdown } from './models.js';
 import { cacheSavingsForEvent, ollamaCloudEquivalent } from './pricing.js';
 
 export const RANGES = ['today', '7d', '30d', 'all'];
 export const PROVIDERS = ['codex', 'claude', 'ollama'];
+export const ECOSYSTEM_PROVIDERS = ['antigravity', 'kiro', 'cursor', 'freebuff', 'opencode', 'grokbot'];
 
 const DAY_MS = 86_400_000;
 
@@ -233,6 +234,7 @@ export function buildView({
   warnings = [],
   ollamaLive = null,
   ollamaCatalog = null,
+  ecosystem = null,
 }) {
   const win = resolveWindow(range, offset, now);
   const keys = bucketKeys(win);
@@ -249,8 +251,10 @@ export function buildView({
   let ollamaPromptEvalMs = 0;
 
   for (const event of inWindow) {
-    addInto(providers[event.provider], event);
-    cacheSavings[event.provider] += cacheSavingsForEvent(event);
+    if (providers[event.provider]) {
+      addInto(providers[event.provider], event);
+      cacheSavings[event.provider] += cacheSavingsForEvent(event);
+    }
 
     if (event.provider === 'ollama') {
       if (event.evalMs > 0 && event.output > 0) {
@@ -262,7 +266,7 @@ export function buildView({
     }
 
     const index = slot.get(bucketOf(win.granularity, event.at));
-    if (index !== undefined) series[event.provider][index] += event.total;
+    if (index !== undefined && series[event.provider]) series[event.provider][index] += event.total;
 
     const key = `${event.provider}:${event.sessionId}`;
     let session = sessions.get(key);
@@ -379,6 +383,8 @@ export function buildView({
     // reported here as unattributed and kept out of the chart.
     models: modelBreakdown(inWindow),
     projects: projectBreakdown(inWindow),
+    apps: appBreakdown(inWindow),
+    ecosystem,
     unattributed: range === 'all' && allTime ? allTime.codex.accountOnly : 0,
     series: { granularity: win.granularity, labels: keys, ...series },
     sessions: sessionRows,

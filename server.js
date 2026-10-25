@@ -3,10 +3,12 @@ import http from 'node:http';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { scanCodex, defaultCodexDir, defaultCodexExtraDirs } from './src/codex.js';
 import { scanClaude, defaultClaudeDir, defaultClaudeBackupDirs } from './src/claude.js';
+import { scanEcosystemApps } from './src/ecosystem.js';
 import { readAccountUsage } from './src/codex-account.js';
 import {
   readLocalOllamaUsage,
@@ -77,11 +79,12 @@ function clampOffset(raw) {
 async function gatherLocalEvents() {
   const claudeDir = defaultClaudeDir();
   const codexDir = defaultCodexDir();
-  const [codex, claude, ollama, ollamaLive] = await Promise.all([
+  const [codex, claude, ollama, ollamaLive, ecosystem] = await Promise.all([
     scanCodex(codexDir),
     scanClaude({ claudeDir, dataDir: DATA_DIR }),
     readLocalOllamaUsage().catch(() => null),
     readOllamaLiveStatus().catch(() => ({ running: false, models: [] })),
+    Promise.resolve().then(() => scanEcosystemApps()).catch(() => ({ events: [], summary: {}, discoveredCount: 0 })),
   ]);
   const ollamaUsage = ollamaEvents(ollama?.records ?? []);
   return {
@@ -92,7 +95,8 @@ async function gatherLocalEvents() {
     ollama,
     ollamaLive,
     ollamaUsage,
-    events: [...codex.events, ...claude.events, ...ollamaUsage],
+    ecosystem,
+    events: [...codex.events, ...claude.events, ...ollamaUsage, ...(ecosystem?.events ?? [])],
   };
 }
 
@@ -102,7 +106,7 @@ async function usageFor(url) {
   const offset = clampOffset(url.searchParams.get('offset'));
   const warnings = [];
 
-  const { codexDir, claudeDir, codex, claude, ollama, ollamaLive, ollamaUsage, events } = await gatherLocalEvents();
+  const { codexDir, claudeDir, codex, claude, ollama, ollamaLive, ollamaUsage, ecosystem, events } = await gatherLocalEvents();
   if (!codex.found) warnings.push(`Codex history not found at ${codexDir}.`);
   if (!claude.found) warnings.push(`Claude Code logs not found at ${path.join(claudeDir, 'projects')}.`);
 
@@ -137,10 +141,12 @@ async function usageFor(url) {
     warnings,
     ollamaLive,
     ollamaCatalog: ollama?.telemetry || null,
+    ecosystem: ecosystem?.summary || null,
     sources: {
       codex: { found: codex.found, files: codex.files },
       claude: { found: claude.found, files: claude.files, records: claude.ledgerRecords },
       ollama: { found: Boolean(ollama?.available), files: ollama?.captureFiles ?? 0, records: ollama?.responses ?? 0 },
+      ecosystem: { found: (ecosystem?.discoveredCount ?? 0) > 0, apps: ecosystem?.summary ?? {} },
     },
   });
 }
@@ -167,12 +173,20 @@ function broadcastRefresh(reason = 'file-change') {
 }
 
 function setupLocalWatchers() {
+  const home = os.homedir();
+  const appData = process.env.APPDATA || (process.platform === 'win32' ? path.join(home, 'AppData', 'Roaming') : '');
   const dirs = new Set([
     path.join(defaultClaudeDir(), 'projects'),
     ...defaultClaudeBackupDirs(),
     path.join(defaultCodexDir(), 'sessions'),
     ...defaultCodexExtraDirs().map((d) => path.join(d, 'sessions')),
     ...defaultOllamaLogsDirs(),
+    path.join(home, '.gemini', 'antigravity', 'brain'),
+    path.join(home, '.kiro', 'sessions'),
+    appData ? path.join(appData, 'Cursor', 'User', 'workspaceStorage') : null,
+    appData ? path.join(appData, 'Freebuff', 'logs') : null,
+    appData ? path.join(appData, 'ai.opencode.desktop') : null,
+    path.join(home, '.grokbot'),
   ]);
   for (const dir of dirs) {
     if (!dir || !fs.existsSync(dir)) continue;

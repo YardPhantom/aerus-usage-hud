@@ -5,20 +5,23 @@ const PROVIDERS = ['codex', 'claude', 'ollama'];
 
 export const MODEL_CHART_LIMIT = 12;
 export const PROJECT_CHART_LIMIT = 12;
+export const APP_CHART_LIMIT = 12;
 export const UNKNOWN_MODEL = 'Unknown model';
 export const UNKNOWN_PROJECT = 'General';
+export const UNKNOWN_APP = 'Other AI App';
 
 function rankDimension(events, { limit, keyField, fallbackName, pluralNoun }) {
   const byKey = new Map();
   for (const event of events) {
-    if (!PROVIDERS.includes(event.provider) || !event.total) continue;
+    if (!event.total) continue;
     const raw = event[keyField];
     const name = raw && String(raw).trim() && raw !== 'unknown' ? String(raw).trim() : fallbackName;
-    const key = `${event.provider}\u0000${name}`;
+    const provider = event.provider || 'other';
+    const key = `${provider}\u0000${name}`;
     let row = byKey.get(key);
     if (!row) {
       row = {
-        provider: event.provider,
+        provider,
         [keyField]: name,
         total: 0,
         cost: 0,
@@ -87,4 +90,18 @@ export function projectBreakdown(events, { limit = PROJECT_CHART_LIMIT } = {}) {
     pluralNoun: 'projects',
   });
   return { total, projects: items, projectCount: count };
+}
+
+export function appBreakdown(events, { limit = APP_CHART_LIMIT } = {}) {
+  const normalized = events.map((e) => ({
+    ...e,
+    appName: e.app || (e.provider === 'codex' ? 'Codex' : e.provider === 'claude' ? 'Claude Code' : e.provider === 'ollama' ? 'Local Ollama' : e.provider),
+  }));
+  const { total, items, count } = rankDimension(normalized, {
+    limit,
+    keyField: 'appName',
+    fallbackName: UNKNOWN_APP,
+    pluralNoun: 'apps',
+  });
+  return { total, apps: items, appCount: count };
 }

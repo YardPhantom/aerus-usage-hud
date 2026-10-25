@@ -24,6 +24,12 @@ const PROVIDER_META = {
   codex: { letter: 'C', label: 'Codex' },
   claude: { letter: 'A', label: 'Claude' },
   ollama: { letter: 'O', label: 'Ollama' },
+  antigravity: { letter: 'AG', label: 'Antigravity' },
+  kiro: { letter: 'KI', label: 'Kiro' },
+  cursor: { letter: 'CU', label: 'Cursor' },
+  freebuff: { letter: 'FB', label: 'Freebuff' },
+  opencode: { letter: 'OC', label: 'OpenCode' },
+  grokbot: { letter: 'GK', label: 'Grok Bot' },
 };
 
 const esc = (value) =>
@@ -153,6 +159,7 @@ function render() {
   renderCost(d);
   renderSessions(d);
   renderBreakdown(d);
+  renderOtherApps(d);
   setText('#foot-sources', footerText(d));
 }
 
@@ -161,22 +168,34 @@ const MODEL_PALETTE = {
   codex: ['#2f8cff', '#5aa9ff', '#1f6fd6', '#8cc4ff'],
   claude: ['#ff8a1f', '#ffb35c', '#e0701a', '#ffa54d'],
   ollama: ['#3ddc84', '#7af0a8', '#27b26a', '#5fe3a0'],
+  antigravity: ['#a855f7', '#c084fc', '#9333ea', '#e9d5ff'],
+  kiro: ['#10b981', '#34d399', '#059669', '#a7f3d0'],
+  cursor: ['#0ea5e9', '#38bdf8', '#0284c7', '#bae6fd'],
+  freebuff: ['#f59e0b', '#fbbf24', '#d97706', '#fde68a'],
+  opencode: ['#14b8a6', '#2dd4bf', '#0d9488', '#99f6e4'],
+  grokbot: ['#ec4899', '#f472b6', '#db2777', '#fbcfe8'],
   other: ['#5b6f88'],
 };
 
 function renderBreakdown(d) {
+  const isApps = state.breakdownMode === 'apps' && d.apps;
   const isProjects = state.breakdownMode === 'projects' && d.projects;
-  setText('#models-title', isProjects ? 'Top projects' : 'Model proportion');
-  setText('#models-subtitle', isProjects ? 'By workspace token usage · click bar to filter' : 'By total token supply · click bar to filter');
+  setText('#models-title', isApps ? 'Coding assistant apps' : (isProjects ? 'Top projects' : 'Model proportion'));
+  setText(
+    '#models-subtitle',
+    isApps
+      ? 'By ecosystem token usage · click bar to filter'
+      : (isProjects ? 'By workspace token usage · click bar to filter' : 'By total token supply · click bar to filter'),
+  );
 
-  const items = isProjects ? d.projects.projects : d.models.models;
-  const total = isProjects ? d.projects.total : d.models.total;
-  const count = isProjects ? d.projects.projectCount : d.models.modelCount;
+  const items = isApps ? d.apps.apps : (isProjects ? d.projects.projects : d.models.models);
+  const total = isApps ? d.apps.total : (isProjects ? d.projects.total : d.models.total);
+  const count = isApps ? d.apps.appCount : (isProjects ? d.projects.projectCount : d.models.modelCount);
   const list = $('#model-bars');
   const shades = {};
 
   if (!items.length) {
-    list.innerHTML = `<li class="model-empty">No ${isProjects ? 'project' : 'model'} usage in this range.</li>`;
+    list.innerHTML = `<li class="model-empty">No ${isApps ? 'assistant app' : (isProjects ? 'project' : 'model')} usage in this range.</li>`;
     $('#model-axis').innerHTML = '';
   } else {
     const max = items[0].total;
@@ -186,26 +205,27 @@ function renderBreakdown(d) {
         shades[row.provider] = (shades[row.provider] ?? -1) + 1;
         const colour = palette[shades[row.provider] % palette.length];
         const width = max ? (row.total / max) * 100 : 0;
-        const name = isProjects ? row.project : row.model;
-        const provLabel = row.provider === 'other' ? name : PROVIDER_META[row.provider]?.label ?? '';
-        const filterType = isProjects ? 'project' : 'model';
-        const isSelected = state.filter?.type === filterType && state.filter.value === name && state.filter.provider === row.provider;
+        const name = isApps ? (row.app || row.provider) : (isProjects ? row.project : row.model);
+        const provLabel = isApps ? name : (row.provider === 'other' ? name : PROVIDER_META[row.provider]?.label ?? '');
+        const filterType = isApps ? 'provider' : (isProjects ? 'project' : 'model');
+        const filterVal = isApps ? row.provider : name;
+        const isSelected = state.filter?.type === filterType && state.filter.value === filterVal && (filterType === 'provider' ? true : state.filter.provider === row.provider);
 
         let extraMeta = '';
-        if (!isProjects && row.avgTokensPerSec > 0) {
+        if (!isProjects && !isApps && row.avgTokensPerSec > 0) {
           extraMeta = ` · ${row.avgTokensPerSec} tok/s`;
-        } else if (isProjects && row.sessions > 0) {
+        } else if ((isProjects || isApps) && row.sessions > 0) {
           extraMeta = ` · ${row.sessions} sess`;
         }
         const costMeta = row.cost > 0 ? ` · ${money(row.cost)}` : '';
         const title = `${provLabel} · ${name} — ${n(row.total)} tokens (${(row.share * 100).toFixed(1)}%)${extraMeta}${costMeta}`;
-        const subBadge = !isProjects && row.avgTokensPerSec > 0
+        const subBadge = !isProjects && !isApps && row.avgTokensPerSec > 0
           ? `${(row.share * 100).toFixed(1)}% · ${row.avgTokensPerSec}t/s`
-          : isProjects && row.cost > 0
+          : (isProjects || isApps) && row.cost > 0
             ? `${(row.share * 100).toFixed(1)}% · ${money(row.cost)}`
             : `${(row.share * 100).toFixed(1)}%`;
 
-        return `<li class="model-row ${esc(row.provider)}${isSelected ? ' selected-row' : ''}" data-filter-type="${filterType}" data-filter-provider="${esc(row.provider)}" data-filter-value="${esc(name)}" title="${esc(title)}">
+        return `<li class="model-row ${esc(row.provider)}${isSelected ? ' selected-row' : ''}" data-filter-type="${filterType}" data-filter-provider="${esc(row.provider)}" data-filter-value="${esc(filterVal)}" title="${esc(title)}">
           <span class="model-name">${esc(name)}</span>
           <span class="model-track"><span class="model-fill" style="width:${width}%;background:linear-gradient(90deg, ${colour}33, ${colour});box-shadow:0 0 10px ${colour}66"></span></span>
           <span class="model-val">${esc(compact(row.total))}<small>${esc(subBadge)}</small></span>
@@ -218,12 +238,68 @@ function renderBreakdown(d) {
   }
 
   const unattributed = d.unattributed || 0;
-  const noun = isProjects ? 'project' : 'model';
+  const noun = isApps ? 'assistant app' : (isProjects ? 'project' : 'model');
   const parts = [`Chart total ${compact(total)} across ${n(count)} ${noun}${count === 1 ? '' : 's'}.`];
-  if (unattributed > 0) {
+  if (unattributed > 0 && !isApps) {
     parts.push(`Account-only Codex usage (${compact(unattributed)}) has no ${noun} identity, so it is not charted. It stays in the Codex total.`);
   }
   setText('#model-note', parts.join(' '));
+}
+
+function renderOtherApps(d) {
+  const container = $('#other-apps-grid');
+  const summaryEl = $('#other-apps-summary');
+  if (!container) return;
+
+  const eco = d.ecosystem || {};
+  const inWindow = d.sessions || [];
+  const tokensByProv = {};
+  const sessByProv = {};
+  for (const s of inWindow) {
+    tokensByProv[s.provider] = (tokensByProv[s.provider] || 0) + (s.total || 0);
+    sessByProv[s.provider] = (sessByProv[s.provider] || 0) + 1;
+  }
+
+  const appKeys = ['antigravity', 'kiro', 'cursor', 'freebuff', 'opencode', 'grokbot'];
+  let detectedCount = 0;
+  let totalEcoSessions = 0;
+
+  const cardsHtml = appKeys
+    .map((key) => {
+      const info = eco[key] || { found: false, sessions: 0, meta: null };
+      const meta = info.meta || PROVIDER_META[key] || { name: key, tag: key.slice(0, 2).toUpperCase(), desc: '' };
+      const isFound = Boolean(info.found);
+      if (isFound) detectedCount++;
+      totalEcoSessions += info.sessions || 0;
+
+      const windowTokens = tokensByProv[key] || 0;
+      const windowSess = sessByProv[key] || 0;
+      const isSelected = state.filter?.type === 'provider' && state.filter.value === key;
+
+      return `
+        <div class="other-app-card ${isSelected ? 'active-app' : ''} ${isFound ? 'installed' : 'missing'}" data-app-key="${esc(key)}" title="${esc(meta.desc || meta.name || meta.label || key)} · Click to filter sessions">
+          <div class="other-app-head">
+            <span class="badge small ${esc(key)}-badge">${esc(meta.tag || meta.letter || key.slice(0, 2).toUpperCase())}</span>
+            <div class="other-app-info">
+              <span class="other-app-name">${esc(meta.name || meta.label || key)}</span>
+              <span class="other-app-status ${isFound ? 'status-ok' : 'status-na'}">
+                <i class="dot ${isFound ? 'ok' : 'dim'}"></i>${isFound ? `${info.sessions} session${info.sessions === 1 ? '' : 's'} on disk` : 'Not installed'}
+              </span>
+            </div>
+          </div>
+          <div class="other-app-stats">
+            <span class="other-app-tokens">${compact(windowTokens)} <small>tokens (${d.label})</small></span>
+            <span class="other-app-sess">${windowSess} sess</span>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+
+  container.innerHTML = cardsHtml;
+  if (summaryEl) {
+    summaryEl.textContent = `${detectedCount} of ${appKeys.length} Apps Detected · ${totalEcoSessions} Total Sessions`;
+  }
 }
 
 // Writes the five token fields. Cache that a source does not record is shown as unavailable, not as zero.
@@ -620,7 +696,10 @@ function footerText(d) {
     ? `${n(d.sources.claude.files)} Claude files, ${n(d.sources.claude.records)} messages kept`
     : 'Claude Code not found';
   const ollama = d.sources.ollama?.found ? `${n(d.sources.ollama.files)} Ollama sources (${n(d.sources.ollama.records)} generations)` : 'Ollama captures not found';
-  return `${codex} · ${claude} · ${ollama}`;
+  const ecoCount = d.sources?.ecosystem?.found
+    ? `${Object.values(d.sources.ecosystem.apps || {}).filter((a) => a.found).length} desktop AI apps logged`
+    : null;
+  return [codex, claude, ollama, ecoCount].filter(Boolean).join(' · ');
 }
 
 function showBanner(messages) {
@@ -804,9 +883,26 @@ function wire() {
       if (state.data) {
         renderBreakdown(state.data);
         renderSessions(state.data);
+        renderOtherApps(state.data);
       }
     }),
   );
+  $('#other-apps-grid')?.addEventListener('click', (event) => {
+    const card = event.target.closest('.other-app-card');
+    if (!card || !card.dataset.appKey) return;
+    const key = card.dataset.appKey;
+    if (state.filter?.type === 'provider' && state.filter.value === key) {
+      state.filter = null;
+    } else {
+      state.filter = { type: 'provider', value: key };
+    }
+    syncControls();
+    if (state.data) {
+      renderBreakdown(state.data);
+      renderSessions(state.data);
+      renderOtherApps(state.data);
+    }
+  });
   $('#unload-vram')?.addEventListener('click', async (event) => {
     event.stopPropagation();
     const btn = $('#unload-vram');
@@ -844,6 +940,7 @@ function wire() {
     if (state.data) {
       renderBreakdown(state.data);
       renderSessions(state.data);
+      renderOtherApps(state.data);
     }
   });
   $('#sessions').addEventListener('click', (event) => {
@@ -868,6 +965,7 @@ function wire() {
     if (state.data) {
       renderBreakdown(state.data);
       renderSessions(state.data);
+      renderOtherApps(state.data);
     }
   });
   $('#session-search')?.addEventListener('input', (event) => {
