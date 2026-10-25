@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 import http from 'node:http';
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { scanCodex, defaultCodexDir } from './src/codex.js';
+import { scanCodex, defaultCodexDir, defaultCodexExtraDirs } from './src/codex.js';
 import { scanClaude, defaultClaudeDir, defaultClaudeBackupDirs } from './src/claude.js';
 import { readAccountUsage } from './src/codex-account.js';
-import { readLocalOllamaUsage, defaultOllamaModelsDir } from './src/local-ollama.js';
+import { readLocalOllamaUsage, readOllamaLiveStatus, defaultOllamaModelsDir, defaultOllamaLogsDirs } from './src/local-ollama.js';
 import { loadStore, saveStore, recordSnapshot } from './src/account-store.js';
 import { computeCodexTotals, computeOllamaTotal, ollamaEvents } from './src/totals.js';
 import { buildView, RANGES } from './src/aggregate.js';
@@ -75,10 +76,11 @@ async function usageFor(url) {
   const codexDir = defaultCodexDir();
   const warnings = [];
 
-  const [codex, claude, ollama] = await Promise.all([
+  const [codex, claude, ollama, ollamaLive] = await Promise.all([
     scanCodex(codexDir),
     scanClaude({ claudeDir, dataDir: DATA_DIR }),
     readLocalOllamaUsage().catch(() => null),
+    readOllamaLiveStatus().catch(() => ({ running: false, models: [] })),
   ]);
   if (!codex.found) warnings.push(`Codex history not found at ${codexDir}.`);
   if (!claude.found) warnings.push(`Claude Code logs not found at ${path.join(claudeDir, 'projects')}.`);
@@ -113,12 +115,60 @@ async function usageFor(url) {
     offset,
     allTime,
     warnings,
+    ollamaLive,
     sources: {
       codex: { found: codex.found, files: codex.files },
       claude: { found: claude.found, files: claude.files, records: claude.ledgerRecords },
       ollama: { found: Boolean(ollama?.available), files: ollama?.captureFiles ?? 0, records: ollama?.responses ?? 0 },
     },
   });
+}
+
+// Live local file watcher for Server-Sent Events (/api/stream).
+const sseClients = new Set();
+const activeWatchers = [];
+let notifyTimer = null;
+
+function broadcastRefresh(reason = 'file-change') {
+  if (!sseClients.size) return;
+  if (notifyTimer) clearTimeout(notifyTimer);
+  notifyTimer = setTimeout(() => {
+    notifyTimer = null;
+    const payload = `data: ${JSON.stringify({ type: 'refresh', reason, at: Date.now() })}\n\n`;
+    for (const res of sseClients) {
+      try {
+        res.write(payload);
+      } catch {
+        sseClients.delete(res);
+      }
+    }
+  }, 900);
+}
+
+function setupLocalWatchers() {
+  const dirs = new Set([
+    path.join(defaultClaudeDir(), 'projects'),
+    ...defaultClaudeBackupDirs(),
+    path.join(defaultCodexDir(), 'sessions'),
+    ...defaultCodexExtraDirs().map((d) => path.join(d, 'sessions')),
+    ...defaultOllamaLogsDirs(),
+  ]);
+  for (const dir of dirs) {
+    if (!dir || !fs.existsSync(dir)) continue;
+    try {
+      const watcher = fs.watch(dir, { recursive: true }, (_eventType, filename) => {
+        if (!filename) return;
+        const lower = String(filename).toLowerCase();
+        if (lower.endsWith('.jsonl') || lower.endsWith('.log') || lower.endsWith('.txt')) {
+          broadcastRefresh(path.basename(String(filename)));
+        }
+      });
+      watcher.on('error', () => {});
+      activeWatchers.push(watcher);
+    } catch {
+      // Recursive fs.watch may not be supported on some virtual filesystems; polling fallback remains active.
+    }
+  }
 }
 
 function send(response, status, body, type) {
@@ -135,6 +185,18 @@ function createServer() {
       } catch (error) {
         send(response, 500, JSON.stringify({ error: 'Unable to scan local usage.', detail: error.message }), 'application/json; charset=utf-8');
       }
+      return;
+    }
+
+    if (url.pathname === '/api/stream') {
+      response.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+      });
+      response.write(`data: ${JSON.stringify({ type: 'connected', at: Date.now() })}\n\n`);
+      sseClients.add(response);
+      request.on('close', () => sseClients.delete(response));
       return;
     }
 
@@ -186,6 +248,8 @@ for (; port < PREFERRED + 10; port += 1) {
   }
 }
 
+setupLocalWatchers();
+
 const url = `http://${HOST}:${port}`;
 console.log('\nAERUS AI USAGE HUD');
 console.log('Local logs stay on this computer.\n');
@@ -196,6 +260,11 @@ console.log(`Ollama     ${defaultOllamaModelsDir()}`);
 console.log(`Data       ${DATA_DIR}\n`);
 if (SHOULD_OPEN) openBrowser(url);
 
-const close = () => server.close(() => process.exit(0));
+const close = () => {
+  for (const w of activeWatchers) {
+    try { w.close(); } catch {}
+  }
+  server.close(() => process.exit(0));
+};
 process.once('SIGINT', close);
 process.once('SIGTERM', close);

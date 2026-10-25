@@ -18,8 +18,9 @@
         <p class="tagline">Unified token tracking for Codex, Claude &amp; Ollama</p>
       </div>
       <div class="status">
-        <span class="chip" id="chip-scan"><i class="dot ok"></i>Live local scan</span>
+        <span class="chip" id="chip-scan"><i class="dot ok"></i><span id="chip-scan-label">Live local scan</span></span>
         <span class="chip" id="chip-updated">Loading…</span>
+        <button class="chip chip-btn" id="toggle-mini" type="button" title="Toggle compact Mini-HUD mode">Mini HUD</button>
         <button class="chip chip-btn" id="refresh" type="button" title="Rescan local history">Refresh</button>
       </div>
     </header>
@@ -42,7 +43,7 @@
 
     <div class="dash">
     <section class="kpis">
-      <article class="card codex" id="kpi-codex">
+      <article class="card codex clickable-card" id="kpi-codex" data-provider-filter="codex" title="Click to filter sessions by Codex">
         <div class="card-head">
           <span class="badge codex-badge">C</span>
           <div>
@@ -59,7 +60,7 @@
         <p class="note" id="codex-note"></p>
       </article>
 
-      <article class="card grand" id="kpi-grand">
+      <article class="card grand clickable-card" id="kpi-grand" data-provider-filter="" title="Click to show all providers">
         <div class="card-head">
           <span class="badge grand-badge" aria-hidden="true"></span>
           <div>
@@ -76,7 +77,7 @@
         <p class="note" id="grand-note"></p>
       </article>
 
-      <article class="card claude" id="kpi-claude">
+      <article class="card claude clickable-card" id="kpi-claude" data-provider-filter="claude" title="Click to filter sessions by Claude">
         <div class="card-head">
           <span class="badge claude-badge">A</span>
           <div>
@@ -93,7 +94,7 @@
         <p class="note" id="claude-note"></p>
       </article>
 
-      <article class="card ollama" id="kpi-ollama">
+      <article class="card ollama clickable-card" id="kpi-ollama" data-provider-filter="ollama" title="Click to filter sessions by Ollama">
         <div class="card-head">
           <span class="badge ollama-badge" aria-hidden="true"></span>
           <div>
@@ -137,7 +138,10 @@
       </article>
 
       <article class="panel">
-        <header class="panel-head"><h2>Estimated API cost (USD)</h2></header>
+        <header class="panel-head">
+          <h2>Estimated API cost (USD)</h2>
+          <span class="cache-pill" id="cache-savings-pill" hidden></span>
+        </header>
         <ul class="cost-list">
           <li class="codex-key">
             <span class="badge small codex-badge">C</span>
@@ -170,8 +174,14 @@
 
     <aside class="panel models" id="models-panel" aria-labelledby="models-title">
       <header class="panel-head">
-        <h2 id="models-title">Model proportion</h2>
-        <span class="subtle">By total token supply</span>
+        <div>
+          <h2 id="models-title">Model proportion</h2>
+          <span class="subtle" id="models-subtitle">By total token supply · click bar to filter</span>
+        </div>
+        <div class="mini-tabs" role="tablist" aria-label="Breakdown mode">
+          <button type="button" class="mini-tab active" data-breakdown="models">Models</button>
+          <button type="button" class="mini-tab" data-breakdown="projects">Projects</button>
+        </div>
       </header>
       <ol class="model-bars" id="model-bars"></ol>
       <div class="model-axis" id="model-axis"></div>
@@ -179,9 +189,17 @@
     </aside>
 
     <section class="panel sessions">
-      <header class="panel-head">
-        <h2>Recent sessions</h2>
-        <button type="button" class="ghost" id="toggle-sessions">View all sessions &rarr;</button>
+      <header class="panel-head sessions-head">
+        <div class="sessions-title-group">
+          <h2>Recent sessions</h2>
+          <button type="button" class="filter-pill" id="active-filter" hidden title="Click to clear filter"></button>
+        </div>
+        <div class="sessions-actions">
+          <input type="search" id="session-search" class="session-search" placeholder="Filter project, model, ID…" aria-label="Filter sessions">
+          <button type="button" class="ghost" id="export-csv" title="Export filtered sessions as CSV">Export CSV</button>
+          <button type="button" class="ghost" id="export-json" title="Export filtered sessions as JSON">Export JSON</button>
+          <button type="button" class="ghost" id="toggle-sessions">View all sessions &rarr;</button>
+        </div>
       </header>
       <div class="table-scroll">
         <table>
@@ -208,7 +226,7 @@
     <footer class="foot">
       <span><i class="dot ok"></i>Local usage database</span>
       <span id="foot-sources"></span>
-      <span>v1.0.0</span>
+      <span>v1.1.0</span>
       <span class="brand-foot">Aerus Creations &nbsp;|&nbsp; A higher kind of intelligence</span>
     </footer>
   </div>

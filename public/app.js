@@ -4,6 +4,10 @@ const state = {
   offset: 0,
   data: null,
   showAll: false,
+  breakdownMode: 'models', // 'models' | 'projects'
+  filter: null, // { type: 'provider' | 'model' | 'project', provider?: string, value: string }
+  search: '',
+  miniHud: false,
   requestId: 0,
   lastLoad: 0,
 };
@@ -42,6 +46,22 @@ function stamp(ms) {
   return new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
+function formatDurationMs(ms) {
+  const sec = Math.round((Number(ms) || 0) / 1000);
+  if (sec <= 0) return '';
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ${sec % 60}s`;
+  const hr = Math.floor(min / 60);
+  return `${hr}h ${min % 60}m`;
+}
+
+function formatBytesGb(bytes) {
+  const b = Number(bytes) || 0;
+  if (b <= 0) return '';
+  return `${(b / (1024 ** 3)).toFixed(1)} GB`;
+}
+
 function setText(selector, value, root = document) {
   const el = $(selector, root);
   if (el) el.textContent = value;
@@ -55,10 +75,21 @@ function syncControls() {
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', String(active));
   });
+  $$('.mini-tab').forEach((tab) => {
+    const active = tab.dataset.breakdown === state.breakdownMode;
+    tab.classList.toggle('active', active);
+  });
+  $$('.clickable-card').forEach((card) => {
+    const pf = card.dataset.providerFilter || '';
+    const active = state.filter?.type === 'provider' && state.filter.value === pf;
+    card.classList.toggle('active-filter-card', active);
+  });
   const isAll = state.range === 'all';
   $('#prev').disabled = isAll;
   $('#next').disabled = isAll || state.offset >= 0;
   $('#toggle-sessions').textContent = state.showAll ? 'Show recent sessions' : 'View all sessions →';
+  const miniBtn = $('#toggle-mini');
+  if (miniBtn) miniBtn.textContent = state.miniHud ? 'Full HUD' : 'Mini HUD';
 }
 
 async function load() {
@@ -102,11 +133,11 @@ function render() {
   renderChart(d);
   renderCost(d);
   renderSessions(d);
-  renderModels(d);
+  renderBreakdown(d);
   setText('#foot-sources', footerText(d));
 }
 
-// Each provider keeps its colour family. Models within a provider get different shades so bars stay distinct.
+// Each provider keeps its colour family. Models/projects within a provider get different shades so bars stay distinct.
 const MODEL_PALETTE = {
   codex: ['#2f8cff', '#5aa9ff', '#1f6fd6', '#8cc4ff'],
   claude: ['#ff8a1f', '#ffb35c', '#e0701a', '#ffa54d'],
@@ -114,26 +145,51 @@ const MODEL_PALETTE = {
   other: ['#5b6f88'],
 };
 
-function renderModels(d) {
-  const { models, total, modelCount } = d.models;
+function renderBreakdown(d) {
+  const isProjects = state.breakdownMode === 'projects' && d.projects;
+  setText('#models-title', isProjects ? 'Top projects' : 'Model proportion');
+  setText('#models-subtitle', isProjects ? 'By workspace token usage · click bar to filter' : 'By total token supply · click bar to filter');
+
+  const items = isProjects ? d.projects.projects : d.models.models;
+  const total = isProjects ? d.projects.total : d.models.total;
+  const count = isProjects ? d.projects.projectCount : d.models.modelCount;
   const list = $('#model-bars');
   const shades = {};
-  if (!models.length) {
-    list.innerHTML = '<li class="model-empty">No model usage in this range.</li>';
+
+  if (!items.length) {
+    list.innerHTML = `<li class="model-empty">No ${isProjects ? 'project' : 'model'} usage in this range.</li>`;
     $('#model-axis').innerHTML = '';
   } else {
-    const max = models[0].total;
-    list.innerHTML = models
+    const max = items[0].total;
+    list.innerHTML = items
       .map((row) => {
         const palette = MODEL_PALETTE[row.provider] ?? MODEL_PALETTE.other;
         shades[row.provider] = (shades[row.provider] ?? -1) + 1;
         const colour = palette[shades[row.provider] % palette.length];
         const width = max ? (row.total / max) * 100 : 0;
-        const label = row.provider === 'other' ? row.model : PROVIDER_META[row.provider]?.label ?? '';
-        return `<li class="model-row ${esc(row.provider)}" title="${esc(label)} · ${esc(row.model)} — ${n(row.total)} tokens (${(row.share * 100).toFixed(1)}%)">
-          <span class="model-name">${esc(row.model)}</span>
+        const name = isProjects ? row.project : row.model;
+        const provLabel = row.provider === 'other' ? name : PROVIDER_META[row.provider]?.label ?? '';
+        const filterType = isProjects ? 'project' : 'model';
+        const isSelected = state.filter?.type === filterType && state.filter.value === name && state.filter.provider === row.provider;
+
+        let extraMeta = '';
+        if (!isProjects && row.avgTokensPerSec > 0) {
+          extraMeta = ` · ${row.avgTokensPerSec} tok/s`;
+        } else if (isProjects && row.sessions > 0) {
+          extraMeta = ` · ${row.sessions} sess`;
+        }
+        const costMeta = row.cost > 0 ? ` · ${money(row.cost)}` : '';
+        const title = `${provLabel} · ${name} — ${n(row.total)} tokens (${(row.share * 100).toFixed(1)}%)${extraMeta}${costMeta}`;
+        const subBadge = !isProjects && row.avgTokensPerSec > 0
+          ? `${(row.share * 100).toFixed(1)}% · ${row.avgTokensPerSec}t/s`
+          : isProjects && row.cost > 0
+            ? `${(row.share * 100).toFixed(1)}% · ${money(row.cost)}`
+            : `${(row.share * 100).toFixed(1)}%`;
+
+        return `<li class="model-row ${esc(row.provider)}${isSelected ? ' selected-row' : ''}" data-filter-type="${filterType}" data-filter-provider="${esc(row.provider)}" data-filter-value="${esc(name)}" title="${esc(title)}">
+          <span class="model-name">${esc(name)}</span>
           <span class="model-track"><span class="model-fill" style="width:${width}%;background:linear-gradient(90deg, ${colour}33, ${colour});box-shadow:0 0 10px ${colour}66"></span></span>
-          <span class="model-val">${esc(compact(row.total))}<small>${(row.share * 100).toFixed(1)}%</small></span>
+          <span class="model-val">${esc(compact(row.total))}<small>${esc(subBadge)}</small></span>
         </li>`;
       })
       .join('');
@@ -143,9 +199,10 @@ function renderModels(d) {
   }
 
   const unattributed = d.unattributed || 0;
-  const parts = [`Chart total ${compact(total)} across ${n(modelCount)} model${modelCount === 1 ? '' : 's'}.`];
+  const noun = isProjects ? 'project' : 'model';
+  const parts = [`Chart total ${compact(total)} across ${n(count)} ${noun}${count === 1 ? '' : 's'}.`];
   if (unattributed > 0) {
-    parts.push(`Account-only Codex usage (${compact(unattributed)}) has no model identity, so it is not charted. It stays in the Codex total.`);
+    parts.push(`Account-only Codex usage (${compact(unattributed)}) has no ${noun} identity, so it is not charted. It stays in the Codex total.`);
   }
   setText('#model-note', parts.join(' '));
 }
@@ -183,6 +240,9 @@ function renderKpis(d) {
   fillCard($('#kpi-ollama'), d.providers.ollama, false);
 
   let codexNote = `${n(d.providers.codex.sessions)} sessions`;
+  if (d.providers.codex.cacheHitRate > 0) {
+    codexNote += ` · ${(d.providers.codex.cacheHitRate * 100).toFixed(0)}% cache hit`;
+  }
   const a = d.allTime;
   if (a) {
     codexNote += ` · Local ${compact(a.codex.localTotal)} · Account-only ${compact(a.codex.accountOnly)}`;
@@ -190,13 +250,38 @@ function renderKpis(d) {
   }
   setText('#codex-note', codexNote);
   setText('#grand-note', 'Codex + Claude + Ollama, each counted once. Cache totals exclude Ollama.');
-  setText('#claude-note', `${n(d.providers.claude.sessions)} sessions`);
-  setText(
-    '#ollama-note',
-    d.sources.ollama?.found
-      ? `${n(d.providers.ollama.sessions)} sessions · Local / self-hosted`
-      : 'No Ollama captures found on this computer',
-  );
+
+  let claudeNote = `${n(d.providers.claude.sessions)} sessions`;
+  if (d.providers.claude.cacheHitRate > 0) {
+    claudeNote += ` · ${(d.providers.claude.cacheHitRate * 100).toFixed(1)}% cache hit`;
+  }
+  if (d.providers.claude.cacheSavedUsd > 0) {
+    claudeNote += ` · ~${money(d.providers.claude.cacheSavedUsd)} saved by cache`;
+  }
+  setText('#claude-note', claudeNote);
+
+  const ollamaTel = d.efficiency?.ollamaTelemetry;
+  const ollamaParts = [];
+  if (d.sources.ollama?.found) {
+    ollamaParts.push(`${n(d.providers.ollama.sessions)} sessions`);
+    if (ollamaTel?.avgTokensPerSec > 0) {
+      ollamaParts.push(`${ollamaTel.avgTokensPerSec} tok/s avg (${ollamaTel.peakTokensPerSec} peak)`);
+    }
+    const computeTime = formatDurationMs((ollamaTel?.totalEvalMs || 0) + (ollamaTel?.totalPromptEvalMs || 0));
+    if (computeTime) ollamaParts.push(`${computeTime} GPU eval`);
+    const activeModels = ollamaTel?.live?.models || [];
+    if (activeModels.length) {
+      const m = activeModels[0];
+      const vram = formatBytesGb(m.sizeVramBytes || m.sizeBytes);
+      const quant = m.quantization ? ` · ${m.quantization}` : '';
+      ollamaParts.push(`VRAM: ${m.name}${vram ? ` (${vram}${quant})` : ''}`);
+    } else {
+      ollamaParts.push('Local / self-hosted');
+    }
+  } else {
+    ollamaParts.push('No Ollama captures found on this computer');
+  }
+  setText('#ollama-note', ollamaParts.join(' · '));
 }
 
 function renderDonut(d) {
@@ -263,17 +348,81 @@ function renderChart(d) {
 function renderCost(d) {
   for (const p of PROVIDERS) setText(`[data-cost="${p}"]`, money(d.providers[p].cost));
   setText('[data-cost="grand"]', money(d.totals.cost));
-  setText('[data-cost-tokens="codex"]', `~ ${compact(d.providers.codex.total)} tokens`);
-  setText('[data-cost-tokens="claude"]', `~ ${compact(d.providers.claude.total)} tokens`);
-  setText('[data-cost-tokens="ollama"]', `${compact(d.providers.ollama.total)} tokens · Local / no API cost`);
+
+  const codexCacheSaved = d.providers.codex.cacheSavedUsd || 0;
+  setText(
+    '[data-cost-tokens="codex"]',
+    `~ ${compact(d.providers.codex.total)} tokens${codexCacheSaved > 0.01 ? ` · ${money(codexCacheSaved)} cache saved` : ''}`,
+  );
+
+  const claudeCacheSaved = d.providers.claude.cacheSavedUsd || 0;
+  setText(
+    '[data-cost-tokens="claude"]',
+    `~ ${compact(d.providers.claude.total)} tokens${claudeCacheSaved > 0.01 ? ` · ${money(claudeCacheSaved)} cache saved` : ''}`,
+  );
+
+  const ollamaEq = d.efficiency?.ollamaCloudEquivalentUsd || 0;
+  setText(
+    '[data-cost-tokens="ollama"]',
+    `${compact(d.providers.ollama.total)} tokens · Local${ollamaEq > 0.01 ? ` (~${money(ollamaEq)} cloud API saved)` : ' / no API cost'}`,
+  );
+
   setText('[data-cost-tokens="grand"]', `~ ${compact(d.totals.total)} tokens`);
+
+  const pill = $('#cache-savings-pill');
+  if (pill) {
+    const totalSaved = (d.efficiency?.cacheSavedUsd || 0) + ollamaEq;
+    if (totalSaved >= 0.01) {
+      const hitPct = ((d.efficiency?.cacheHitRate || 0) * 100).toFixed(1);
+      pill.textContent = `${hitPct}% cache hit · ~${money(totalSaved)} saved`;
+      pill.hidden = false;
+    } else {
+      pill.hidden = true;
+    }
+  }
+}
+
+function getFilteredSessions(d) {
+  let list = d?.sessions || [];
+  if (state.filter) {
+    const { type, provider, value } = state.filter;
+    if (type === 'provider' && value) {
+      list = list.filter((s) => s.provider === value);
+    } else if (type === 'model' && value) {
+      list = list.filter((s) => (provider === 'other' ? true : s.provider === provider) && s.model === value);
+    } else if (type === 'project' && value) {
+      list = list.filter((s) => (provider === 'other' ? true : s.provider === provider) && s.project === value);
+    }
+  }
+  const q = state.search.trim().toLowerCase();
+  if (q) {
+    list = list.filter(
+      (s) =>
+        String(s.project || '').toLowerCase().includes(q) ||
+        String(s.model || '').toLowerCase().includes(q) ||
+        String(s.sessionId || '').toLowerCase().includes(q) ||
+        String(s.provider || '').toLowerCase().includes(q),
+    );
+  }
+  return list;
 }
 
 function renderSessions(d) {
-  const rows = d.sessions.slice(0, state.showAll ? 200 : 6);
+  const pill = $('#active-filter');
+  if (pill) {
+    if (state.filter && state.filter.value) {
+      pill.textContent = `${state.filter.type}: ${state.filter.value} ×`;
+      pill.hidden = false;
+    } else {
+      pill.hidden = true;
+    }
+  }
+
+  const filtered = getFilteredSessions(d);
+  const rows = filtered.slice(0, state.showAll ? 500 : 8);
   const body = $('#sessions');
   if (!rows.length) {
-    body.innerHTML = `<tr><td class="empty-cell" colspan="9">No token usage in this range.</td></tr>`;
+    body.innerHTML = `<tr><td class="empty-cell" colspan="9">No matching sessions in this range.</td></tr>`;
   } else {
     body.innerHTML = rows
       .map((s, i) => {
@@ -281,11 +430,12 @@ function renderSessions(d) {
         const cache = s.cache == null
           ? '<span class="na" title="Ollama captures do not record cache tokens">Unavailable</span>'
           : n(s.cache);
+        const speedBadge = s.tokensPerSec > 0 ? `<span class="speed-tag" title="Average generation throughput">${s.tokensPerSec} tok/s</span>` : '';
         return `<tr>
           <td class="num">${i + 1}</td>
           <td><span class="prov ${s.provider}"><span class="badge ${s.provider}-badge">${meta.letter}</span>${meta.label}</span></td>
           <td><span class="sess-name">${esc(s.project)}</span><span class="sess-id">${esc(shortId(s.sessionId))}</span></td>
-          <td>${esc(s.model)}</td>
+          <td>${esc(s.model)}${speedBadge}</td>
           <td>${esc(stamp(s.at))}</td>
           <td class="num">${n(s.input)}</td>
           <td class="num">${n(s.output)}</td>
@@ -296,7 +446,7 @@ function renderSessions(d) {
       .join('');
   }
   const toggle = $('#toggle-sessions');
-  toggle.hidden = d.sessions.length <= 6;
+  toggle.hidden = filtered.length <= 8;
 }
 
 function footerText(d) {
@@ -304,7 +454,7 @@ function footerText(d) {
   const claude = d.sources.claude?.found
     ? `${n(d.sources.claude.files)} Claude files, ${n(d.sources.claude.records)} messages kept`
     : 'Claude Code not found';
-  const ollama = d.sources.ollama?.found ? `${n(d.sources.ollama.files)} Ollama captures` : 'Ollama captures not found';
+  const ollama = d.sources.ollama?.found ? `${n(d.sources.ollama.files)} Ollama sources (${n(d.sources.ollama.records)} generations)` : 'Ollama captures not found';
   return `${codex} · ${claude} · ${ollama}`;
 }
 
@@ -317,6 +467,67 @@ function showBanner(messages) {
   }
   banner.hidden = false;
   banner.textContent = messages.join(' ');
+}
+
+// Export helpers -----------------------------------------------------------
+
+function downloadBlob(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportSessionsCsv() {
+  if (!state.data) return;
+  const rows = getFilteredSessions(state.data);
+  const headers = ['provider', 'project', 'sessionId', 'model', 'timestamp', 'input', 'output', 'cache', 'total', 'costUsd', 'tokensPerSec'];
+  const csvCell = (val) => {
+    const str = String(val ?? '');
+    return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+  };
+  const lines = [
+    headers.join(','),
+    ...rows.map((r) =>
+      [
+        r.provider,
+        r.project,
+        r.sessionId,
+        r.model,
+        new Date(r.at).toISOString(),
+        r.input,
+        r.output,
+        r.cache ?? '',
+        r.total,
+        (Number(r.cost) || 0).toFixed(4),
+        r.tokensPerSec || '',
+      ]
+        .map(csvCell)
+        .join(','),
+    ),
+  ];
+  downloadBlob(`aerus-usage-${state.range}.csv`, lines.join('\n'), 'text/csv;charset=utf-8');
+}
+
+function exportSessionsJson() {
+  if (!state.data) return;
+  const rows = getFilteredSessions(state.data);
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    range: state.range,
+    label: state.data.label,
+    filter: state.filter,
+    totals: state.data.totals,
+    providers: state.data.providers,
+    efficiency: state.data.efficiency,
+    sessions: rows,
+  };
+  downloadBlob(`aerus-usage-${state.range}.json`, JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
 }
 
 // Chart tooltip ------------------------------------------------------------
@@ -354,6 +565,39 @@ function wireTooltip() {
   });
 }
 
+// Live SSE stream ----------------------------------------------------------
+
+function connectLiveStream() {
+  if (typeof EventSource === 'undefined') return;
+  try {
+    const es = new EventSource('/api/stream');
+    es.addEventListener('message', (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'connected') {
+          setText('#chip-scan-label', 'Live local stream');
+        } else if (msg.type === 'refresh') {
+          load();
+        }
+      } catch {}
+    });
+    es.addEventListener('error', () => {
+      setText('#chip-scan-label', 'Live local scan');
+    });
+  } catch {}
+}
+
+function toggleMiniHud(forceState) {
+  state.miniHud = typeof forceState === 'boolean' ? forceState : !state.miniHud;
+  document.body.classList.toggle('mini-hud', state.miniHud);
+  syncControls();
+  try {
+    window.chrome?.webview?.postMessage(JSON.stringify({ type: 'mini-hud', enabled: state.miniHud }));
+  } catch {}
+}
+
+window.setAerusMiniHud = (enabled) => toggleMiniHud(Boolean(enabled));
+
 // Wiring -------------------------------------------------------------------
 
 function wire() {
@@ -366,6 +610,61 @@ function wire() {
       load();
     }),
   );
+  $$('.mini-tab').forEach((tab) =>
+    tab.addEventListener('click', () => {
+      state.breakdownMode = tab.dataset.breakdown;
+      syncControls();
+      if (state.data) renderBreakdown(state.data);
+    }),
+  );
+  $$('.clickable-card').forEach((card) =>
+    card.addEventListener('click', () => {
+      const pf = card.dataset.providerFilter || '';
+      if (!pf || (state.filter?.type === 'provider' && state.filter.value === pf)) {
+        state.filter = null;
+      } else {
+        state.filter = { type: 'provider', value: pf };
+      }
+      syncControls();
+      if (state.data) {
+        renderBreakdown(state.data);
+        renderSessions(state.data);
+      }
+    }),
+  );
+  $('#model-bars').addEventListener('click', (event) => {
+    const row = event.target.closest('.model-row');
+    if (!row || !row.dataset.filterValue) return;
+    const type = row.dataset.filterType || 'model';
+    const provider = row.dataset.filterProvider || '';
+    const value = row.dataset.filterValue;
+    if (value.startsWith('Other (')) return;
+    if (state.filter?.type === type && state.filter.value === value && state.filter.provider === provider) {
+      state.filter = null;
+    } else {
+      state.filter = { type, provider, value };
+    }
+    syncControls();
+    if (state.data) {
+      renderBreakdown(state.data);
+      renderSessions(state.data);
+    }
+  });
+  $('#active-filter')?.addEventListener('click', () => {
+    state.filter = null;
+    syncControls();
+    if (state.data) {
+      renderBreakdown(state.data);
+      renderSessions(state.data);
+    }
+  });
+  $('#session-search')?.addEventListener('input', (event) => {
+    state.search = event.target.value || '';
+    if (state.data) renderSessions(state.data);
+  });
+  $('#export-csv')?.addEventListener('click', exportSessionsCsv);
+  $('#export-json')?.addEventListener('click', exportSessionsJson);
+  $('#toggle-mini')?.addEventListener('click', () => toggleMiniHud());
   $('#prev').addEventListener('click', () => {
     state.offset -= 1;
     load();
@@ -382,6 +681,7 @@ function wire() {
     syncControls();
   });
   wireTooltip();
+  connectLiveStream();
 
   // Refresh when the window comes back into view, and once a minute while it stays open.
   document.addEventListener('visibilitychange', () => {

@@ -310,6 +310,8 @@ test('Ollama server logs and secondary drive model manifests are auto-discovered
     assert.equal(usage.outputTokens, 120);
     assert.equal(usage.totalTokens, 520);
     assert.equal(usage.models[0].name, 'qwen3-coder:30b');
+    assert.equal(usage.telemetry.avgTokensPerSec, 50);
+    assert.equal(usage.telemetry.peakTokensPerSec, 50);
   } finally {
     if (savedDrives === undefined) delete process.env.AERUS_DRIVES;
     else process.env.AERUS_DRIVES = savedDrives;

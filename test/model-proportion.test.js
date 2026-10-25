@@ -89,3 +89,63 @@ test('with no usage in the window the breakdown is empty and nothing is invented
   assert.equal(view.models.total, 0);
   assert.equal(view.unattributed, 0);
 });
+
+
+test('projectBreakdown ranks projects across providers with session counts and costs', async () => {
+  const { projectBreakdown } = await import('../src/models.js');
+  const events = [
+    { ...ev('claude', 'claude-sonnet-4-5', 600), project: 'alpha-engine', sessionId: 's1', cost: 2.5 },
+    { ...ev('claude', 'claude-sonnet-4-5', 400), project: 'alpha-engine', sessionId: 's2', cost: 1.5 },
+    { ...ev('codex', 'gpt-5', 300), project: 'beta-ui', sessionId: 's3', cost: 0.75 },
+  ];
+  const result = projectBreakdown(events);
+  assert.equal(result.projectCount, 2);
+  assert.equal(result.projects[0].project, 'alpha-engine');
+  assert.equal(result.projects[0].total, 1000);
+  assert.equal(result.projects[0].sessions, 2);
+  assert.equal(result.projects[0].cost, 4.0);
+  assert.equal(result.projects[1].project, 'beta-ui');
+});
+
+test('buildView calculates prompt cache hit rate, cache savings USD, and Ollama throughput telemetry', () => {
+  const events = [
+    {
+      provider: 'claude',
+      at: NOW - 30_000,
+      sessionId: 'c1',
+      project: 'demo',
+      model: 'claude-sonnet-4-5',
+      input: 100_000,
+      output: 10_000,
+      cacheRead: 900_000,
+      cacheWrite: 0,
+      total: 1_010_000,
+      cost: 0.72,
+    },
+    {
+      provider: 'ollama',
+      at: NOW - 20_000,
+      sessionId: 'o1',
+      project: 'Local Ollama',
+      model: 'qwen3-coder:30b',
+      input: 500_000,
+      output: 500_000,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cacheKnown: false,
+      total: 1_000_000,
+      cost: 0,
+      evalMs: 10_000_000,
+      promptEvalMs: 2_000,
+      tokensPerSec: 50,
+    },
+  ];
+  const view = buildView({ events, range: 'today', offset: 0, now: NOW });
+  assert.ok(Math.abs(view.providers.claude.cacheHitRate - 0.9) < 1e-6);
+  // 900k cacheRead on Sonnet ($3/M input, 90% discount) saves $2.43
+  assert.ok(Math.abs(view.providers.claude.cacheSavedUsd - 2.43) < 1e-6);
+  // 500k input ($2/M) + 500k output ($8/M) = $5.00 cloud equivalent saved
+  assert.ok(Math.abs(view.efficiency.ollamaCloudEquivalentUsd - 5.0) < 1e-6);
+  assert.equal(view.efficiency.ollamaTelemetry.avgTokensPerSec, 50);
+  assert.equal(view.efficiency.ollamaTelemetry.peakTokensPerSec, 50);
+});

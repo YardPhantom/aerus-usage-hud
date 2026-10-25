@@ -3,13 +3,14 @@ using System.Drawing;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
 namespace Aerus.UsageHud.Desktop;
 
-// Hosts the HUD in a WebView2 window with an embedded title strip. The bundled Node runtime serves the
-// dashboard on 127.0.0.1 only.
+// Hosts the HUD in a WebView2 window with an embedded title strip and system tray support.
+// The bundled Node runtime serves the dashboard on 127.0.0.1 only.
 internal sealed class MainForm : Form
 {
     public const string WindowTitle = "Aerus AI Usage HUD";
@@ -36,7 +37,9 @@ internal sealed class MainForm : Form
 
     private readonly Panel _titleBar = new() { Dock = DockStyle.Top, Height = 36, BackColor = StripBackground };
     private readonly Button _maximizeButton = new();
+    private readonly Button _pinButton = new();
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill, Visible = false };
+    private readonly NotifyIcon _tray = new();
     private readonly Label _status = new()
     {
         Dock = DockStyle.Fill,
@@ -49,6 +52,8 @@ internal sealed class MainForm : Form
 
     private Process? _server;
     private ChildJob? _job;
+    private Rectangle _normalBounds;
+    private bool _miniMode;
 
     private static string ResolveDataRoot()
     {
@@ -73,11 +78,17 @@ internal sealed class MainForm : Form
         if (File.Exists(icon)) Icon = new Icon(icon);
 
         BuildTitleBar();
+        BuildTrayIcon();
         Controls.Add(_web);
         Controls.Add(_status);
         Controls.Add(_titleBar);
         Shown += async (_, _) => await StartAsync();
-        FormClosing += (_, _) => StopServer();
+        FormClosing += (_, _) =>
+        {
+            _tray.Visible = false;
+            _tray.Dispose();
+            StopServer();
+        };
         Resize += (_, _) => UpdateMaximizeButton();
     }
 
@@ -187,7 +198,7 @@ internal sealed class MainForm : Form
 
         var controls = new FlowLayoutPanel
         {
-            Dock = DockStyle.Right, Width = 138, Height = 36, FlowDirection = FlowDirection.RightToLeft,
+            Dock = DockStyle.Right, Width = 184, Height = 36, FlowDirection = FlowDirection.RightToLeft,
             WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty, BackColor = Color.Transparent,
         };
         var close = CreateWindowButton("×", "Close", 13);
@@ -198,11 +209,86 @@ internal sealed class MainForm : Form
         _maximizeButton.Click += (_, _) => ToggleMaximize();
         var minimize = CreateWindowButton("—", "Minimize", 10);
         minimize.Click += (_, _) => WindowState = FormWindowState.Minimized;
+        StyleWindowButton(_pinButton, "Pin Always on Top", 10);
+        _pinButton.Text = "⊤";
+        _pinButton.Click += (_, _) => ToggleTopMost();
         controls.Controls.Add(close);
         controls.Controls.Add(_maximizeButton);
         controls.Controls.Add(minimize);
+        controls.Controls.Add(_pinButton);
         _titleBar.Controls.Add(controls);
         UpdateMaximizeButton();
+        UpdatePinButton();
+    }
+
+    private void BuildTrayIcon()
+    {
+        _tray.Icon = Icon ?? SystemIcons.Application;
+        _tray.Text = WindowTitle;
+        _tray.Visible = true;
+        _tray.DoubleClick += (_, _) => RestoreWindow();
+
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Open HUD", null, (_, _) => RestoreWindow());
+        menu.Items.Add("Toggle Mini-HUD Mode", null, async (_, _) =>
+        {
+            RestoreWindow();
+            SetMiniMode(!_miniMode);
+            if (_web.CoreWebView2 is not null)
+            {
+                await _web.CoreWebView2.ExecuteScriptAsync($"window.setAerusMiniHud && window.setAerusMiniHud({(_miniMode ? "true" : "false")});");
+            }
+        });
+        menu.Items.Add("Toggle Always on Top", null, (_, _) => ToggleTopMost());
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Exit Aerus HUD", null, (_, _) => Close());
+        _tray.ContextMenuStrip = menu;
+    }
+
+    private void RestoreWindow()
+    {
+        if (!Visible) Show();
+        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        Activate();
+    }
+
+    private void ToggleTopMost()
+    {
+        TopMost = !TopMost;
+        UpdatePinButton();
+    }
+
+    private void UpdatePinButton()
+    {
+        if (_pinButton.IsDisposed) return;
+        _pinButton.ForeColor = TopMost ? Cyan : Color.FromArgb(205, 238, 222);
+    }
+
+    private void SetMiniMode(bool enabled)
+    {
+        if (_miniMode == enabled) return;
+        _miniMode = enabled;
+        if (enabled)
+        {
+            if (WindowState == FormWindowState.Maximized) WindowState = FormWindowState.Normal;
+            _normalBounds = Bounds;
+            MinimumSize = new Size(440, 260);
+            var work = Screen.FromHandle(Handle).WorkingArea;
+            var w = 520;
+            var h = 300;
+            Bounds = new Rectangle(work.Right - w - 20, work.Bottom - h - 20, w, h);
+            TopMost = true;
+        }
+        else
+        {
+            MinimumSize = new Size(1040, 760);
+            if (_normalBounds.Width >= 1040 && _normalBounds.Height >= 760)
+            {
+                Bounds = _normalBounds;
+            }
+            TopMost = false;
+        }
+        UpdatePinButton();
     }
 
     private static Button CreateWindowButton(string glyph, string name, float fontSize)
@@ -272,6 +358,22 @@ internal sealed class MainForm : Form
             var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(_dataRoot, "WebView2"));
             await _web.EnsureCoreWebView2Async(environment);
             _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
+            _web.CoreWebView2.WebMessageReceived += (_, args) =>
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(args.TryGetWebMessageAsString());
+                    if (doc.RootElement.TryGetProperty("type", out var typeProp) && typeProp.GetString() == "mini-hud")
+                    {
+                        var enabled = doc.RootElement.TryGetProperty("enabled", out var en) && en.GetBoolean();
+                        BeginInvoke(() => SetMiniMode(enabled));
+                    }
+                }
+                catch
+                {
+                    // Ignore malformed messages.
+                }
+            };
             _web.Source = new Uri(url);
             _web.Visible = true;
             _status.Visible = false;

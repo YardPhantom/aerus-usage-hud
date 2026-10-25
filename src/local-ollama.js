@@ -209,6 +209,7 @@ async function readServerLog(file, blobToModels) {
   let currentModel = 'unknown';
   let currentTime = stat.mtimeMs;
   let pendingPrompt = 0;
+  let pendingPromptMs = 0;
   let pendingPromptSig = '';
 
   const input = fs.createReadStream(file, { encoding: 'utf8' });
@@ -240,13 +241,17 @@ async function readServerLog(file, blobToModels) {
       if (line.includes('eval time =')) {
         const pMatch = line.match(/prompt eval time\s*=\s*([\d.]+)\s*ms\s*\/\s*(\d+)\s*tokens/);
         if (pMatch) {
+          pendingPromptMs = number(pMatch[1]);
           pendingPrompt = number(pMatch[2]);
           pendingPromptSig = `${pMatch[1]}:${pMatch[2]}`;
           continue;
         }
-        const eMatch = line.match(/(?<!prompt )eval time\s*=\s*([\d.]+)\s*ms\s*\/\s*(\d+)\s*tokens/);
+        const eMatch = line.match(/(?<!prompt )eval time\s*=\s*([\d.]+)\s*ms\s*\/\s*(\d+)\s*tokens(?:\s*\([^,]*,\s*([\d.]+)\s*tokens per second\))?/);
         if (eMatch) {
+          const evalMs = number(eMatch[1]);
           const outputTokens = number(eMatch[2]);
+          const reportedTps = number(eMatch[3]);
+          const tokensPerSec = reportedTps || (evalMs > 0 && outputTokens > 0 ? (outputTokens / evalMs) * 1000 : 0);
           const inputTokens = pendingPrompt;
           const totalTokens = inputTokens + outputTokens;
           if (totalTokens > 0) {
@@ -259,9 +264,13 @@ async function readServerLog(file, blobToModels) {
               input: inputTokens,
               output: outputTokens,
               total: totalTokens,
+              promptEvalMs: pendingPromptMs,
+              evalMs,
+              tokensPerSec,
             });
           }
           pendingPrompt = 0;
+          pendingPromptMs = 0;
           pendingPromptSig = '';
         }
       }
@@ -284,9 +293,20 @@ function summarize(files, logFiles) {
     models: [],
     dailyUsageBuckets: [],
     records: [],
+    telemetry: {
+      avgTokensPerSec: 0,
+      peakTokensPerSec: 0,
+      totalEvalMs: 0,
+      totalPromptEvalMs: 0,
+      cloudEquivalentUsd: 0,
+    },
   };
   const models = new Map();
   const days = new Map();
+  let timedOutputTokens = 0;
+  let timedEvalMs = 0;
+  let peakTps = 0;
+  let totalPromptMs = 0;
 
   for (const entry of files.values()) {
     if (!entry.usage.responses) continue;
@@ -303,6 +323,9 @@ function summarize(files, logFiles) {
         input: entry.usage.inputTokens,
         output: entry.usage.outputTokens,
         total: entry.usage.totalTokens,
+        evalMs: 0,
+        promptEvalMs: 0,
+        tokensPerSec: 0,
       });
     }
   }
@@ -319,19 +342,67 @@ function summarize(files, logFiles) {
       summary.totalTokens += rec.total;
       models.set(rec.model, (models.get(rec.model) || 0) + rec.total);
       if (rec.date) days.set(rec.date, (days.get(rec.date) || 0) + rec.total);
+      if (rec.evalMs > 0 && rec.output > 0) {
+        timedOutputTokens += rec.output;
+        timedEvalMs += rec.evalMs;
+      }
+      if (rec.promptEvalMs > 0) totalPromptMs += rec.promptEvalMs;
+      if (rec.tokensPerSec > peakTps) peakTps = rec.tokensPerSec;
       summary.records.push({
         at: rec.at,
         model: rec.model,
         input: rec.input,
         output: rec.output,
         total: rec.total,
+        evalMs: rec.evalMs || 0,
+        promptEvalMs: rec.promptEvalMs || 0,
+        tokensPerSec: rec.tokensPerSec || 0,
       });
     }
   }
 
+  summary.telemetry = {
+    avgTokensPerSec: timedEvalMs > 0 ? Number(((timedOutputTokens / timedEvalMs) * 1000).toFixed(1)) : 0,
+    peakTokensPerSec: Number(peakTps.toFixed(1)),
+    totalEvalMs: Math.round(timedEvalMs),
+    totalPromptEvalMs: Math.round(totalPromptMs),
+    // Cloud equivalent savings vs standard $2/1M input + $8/1M output API rates.
+    cloudEquivalentUsd: (summary.inputTokens * 2 + summary.outputTokens * 8) / 1e6,
+  };
+
   summary.models = [...models.entries()].map(([name, tokens]) => ({ name, tokens })).sort((a, b) => b.tokens - a.tokens);
   summary.dailyUsageBuckets = [...days.entries()].map(([startDate, tokens]) => ({ startDate, tokens })).sort((a, b) => a.startDate.localeCompare(b.startDate));
   return summary;
+}
+
+// Queries the local Ollama daemon (127.0.0.1:11434/api/ps) to inspect models currently loaded in VRAM.
+export async function readOllamaLiveStatus() {
+  if (process.env.AERUS_OLLAMA_LIVE === 'off' || process.env.AERU_OLLAMA_CAPTURE_DIR) {
+    return { running: false, models: [] };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 450);
+  try {
+    const res = await fetch('http://127.0.0.1:11434/api/ps', { signal: controller.signal });
+    if (!res.ok) return { running: false, models: [] };
+    const body = await res.json();
+    const list = Array.isArray(body?.models) ? body.models : [];
+    return {
+      running: true,
+      models: list.map((m) => ({
+        name: m.name || m.model || 'unknown',
+        sizeBytes: number(m.size),
+        sizeVramBytes: number(m.size_vram),
+        quantization: m.details?.quantization_level || null,
+        parameterSize: m.details?.parameter_size || null,
+        contextLength: number(m.context_length),
+      })),
+    };
+  } catch {
+    return { running: false, models: [] };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function readLocalOllamaUsage() {

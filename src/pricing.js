@@ -65,3 +65,23 @@ export function claudeCost(model, { input, output, cacheRead, cw5m, cw1h }) {
   const cacheMultiplier = cw5m * 1.25 + cw1h * 2 + cacheRead * 0.1;
   return (input * r.input + output * r.output + cacheMultiplier * r.input) / 1e6;
 }
+
+// Estimates USD saved by prompt cache hits vs paying full fresh input rates.
+export function cacheSavingsForEvent(event) {
+  const cacheRead = Number(event?.cacheRead) || 0;
+  if (cacheRead <= 0) return 0;
+  if (event.provider === 'codex') {
+    const r = codexRate(event.model);
+    return (cacheRead * Math.max(0, r.input - r.cached)) / 1e6;
+  }
+  if (event.provider === 'claude') {
+    const r = claudeRate(event.model);
+    return (cacheRead * (r.input * 0.9)) / 1e6;
+  }
+  return 0;
+}
+
+// Estimates the equivalent cloud API cost ($2/M input, $8/M output) saved by running a model locally via Ollama.
+export function ollamaCloudEquivalent({ input = 0, output = 0 } = {}) {
+  return (Number(input) * 2 + Number(output) * 8) / 1e6;
+}

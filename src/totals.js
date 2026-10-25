@@ -64,6 +64,9 @@ export function ollamaEvents(records) {
       cacheKnown: false,
       total: record.input + record.output,
       cost: 0,
+      evalMs: record.evalMs || 0,
+      promptEvalMs: record.promptEvalMs || 0,
+      tokensPerSec: record.tokensPerSec || 0,
     };
   });
 }
