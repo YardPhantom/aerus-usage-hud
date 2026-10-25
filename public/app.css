@@ -221,7 +221,8 @@ h1 {
 .card.ollama { color: var(--ollama); border-color: rgba(61, 220, 132, 0.5); background: linear-gradient(160deg, rgba(61, 220, 132, 0.13), var(--panel) 55%); }
 .card.ollama .figure { color: #cdf7dc; }
 
-.card-head { display: flex; gap: 16px; align-items: center; }
+.card-head { display: flex; gap: 14px; align-items: center; min-width: 0; }
+.card-head > div { min-width: 0; flex: 1 1 auto; }
 
 .badge {
   width: 58px; height: 58px; flex: 0 0 58px;
@@ -273,25 +274,27 @@ h1 {
   margin: 4px 0 0;
   font-family: var(--display);
   font-weight: 600;
-  font-size: 24px;
+  font-size: clamp(18px, 1.4vw, 24px);
   letter-spacing: 0.01em;
   color: var(--text);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.grand .figure { color: var(--grand); text-shadow: 0 0 22px rgba(34, 227, 240, 0.35); font-size: 26px; }
+.grand .figure { color: var(--grand); text-shadow: 0 0 22px rgba(34, 227, 240, 0.35); font-size: clamp(19px, 1.5vw, 26px); }
 .card.claude .figure { color: #ffd6a8; }
 .card.codex .figure { color: #cfe4ff; }
-.figure small { font-size: 14px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+.figure small { font-size: 13px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
 .grand .figure small { color: rgba(34, 227, 240, 0.7); }
 
 .mini {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-top: 18px;
   padding-top: 14px;
   border-top: 1px solid var(--panel-line);
 }
-.mini > div { text-align: center; padding: 0 6px; border-left: 1px solid rgba(88, 150, 210, 0.1); }
+.mini > div { text-align: center; padding: 0 4px; border-left: 1px solid rgba(88, 150, 210, 0.1); min-width: 0; }
 .mini > div:first-child { border-left: 0; }
 .mini b {
   display: block;
@@ -304,7 +307,14 @@ h1 {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.mini span { font-size: 11px; color: var(--muted); }
+.mini span {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .mini b.na { font-size: 11px; font-weight: 500; font-style: italic; color: var(--faint); }
 
 .note { margin: 12px 0 0; font-size: 12px; color: var(--muted); }
@@ -359,8 +369,8 @@ h1 {
 .ollama-key { color: var(--ollama); }
 
 /* Donut */
-.donut-wrap { display: flex; align-items: center; gap: 22px; }
-.donut { width: 210px; height: 210px; flex: 0 0 210px; overflow: visible; }
+.donut-wrap { display: flex; align-items: center; justify-content: center; gap: 18px; flex-wrap: wrap; }
+.donut { width: 176px; height: 176px; flex: 0 0 176px; overflow: visible; }
 .donut .track { fill: none; stroke: rgba(88, 150, 210, 0.1); stroke-width: 26; }
 .donut .seg-codex, .donut .seg-claude, .donut .seg-ollama {
   fill: none;
@@ -373,11 +383,11 @@ h1 {
 .donut .center-val { fill: var(--text); font-family: var(--display); font-size: 25px; font-weight: 600; }
 .donut .center-unit { fill: var(--muted); font-family: var(--display); font-size: 12px; letter-spacing: 0.2em; text-transform: uppercase; }
 
-.legend { list-style: none; margin: 0; padding: 0; display: grid; gap: 18px; }
-.legend li { display: flex; gap: 12px; align-items: flex-start; }
-.legend .swatch { margin-top: 5px; }
-.legend strong { display: block; font-size: 15px; color: var(--text); }
-.legend small { color: var(--muted); font-size: 13px; }
+.legend { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; flex: 1 1 130px; min-width: 130px; }
+.legend li { display: flex; gap: 10px; align-items: flex-start; min-width: 0; }
+.legend .swatch { margin-top: 5px; flex: 0 0 10px; }
+.legend strong { display: block; font-size: 14px; color: var(--text); }
+.legend small { display: block; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .codex-key strong { color: var(--codex); }
 .claude-key strong { color: var(--claude); }
 .ollama-key strong { color: var(--ollama); }
@@ -442,11 +452,13 @@ h1 {
 .x-axis {
   grid-column: 2;
   position: relative;
-  height: 18px;
+  height: 20px;
   font-size: 11px;
   color: var(--faint);
+  overflow: hidden;
+  pointer-events: none;
 }
-.x-axis span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.x-axis span { position: absolute; top: 3px; transform: translateX(-50%); white-space: nowrap; }
 
 .chart-empty {
   position: absolute; inset: 0 0 22px 60px;
@@ -463,23 +475,27 @@ h1 {
   grid-template-columns: auto 1fr auto;
   align-items: center;
   column-gap: 12px;
+  row-gap: 3px;
   padding: 10px 0;
   border-bottom: 1px solid rgba(88, 150, 210, 0.1);
 }
 .cost-list li:last-child { border-bottom: 0; }
-.cost-list .cost-name { font-size: 14px; color: var(--text); }
+.cost-list .cost-name { font-size: 14px; color: var(--text); white-space: nowrap; }
 .cost-list .cost-val {
   font-family: var(--display);
   font-size: 19px;
   font-weight: 600;
   text-align: right;
+  white-space: nowrap;
 }
 .cost-list small {
   grid-column: 2 / 4;
   justify-self: end;
   color: var(--muted);
   font-size: 12px;
-  margin-top: -6px;
+  line-height: 1.3;
+  text-align: right;
+  margin-top: 0;
 }
 .cost-list .codex-key .cost-val { color: var(--codex); }
 .cost-list .claude-key .cost-val { color: var(--claude); }
@@ -631,7 +647,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .model-bars { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 .model-row {
   display: grid;
-  grid-template-columns: 150px 1fr 84px;
+  grid-template-columns: 140px 1fr 98px;
   align-items: center;
   gap: 12px;
   min-width: 0;
@@ -665,17 +681,20 @@ tbody tr:last-child td { border-bottom: 0; }
   text-align: right;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.model-val small { display: block; font-size: 11px; color: var(--muted); font-family: "Segoe UI", system-ui, sans-serif; }
+.model-val small { display: block; font-size: 11px; color: var(--muted); font-family: "Segoe UI", system-ui, sans-serif; overflow: hidden; text-overflow: ellipsis; }
 .model-row.codex .model-val { color: #cfe4ff; }
 .model-row.claude .model-val { color: #ffd6a8; }
 .model-row.ollama .model-val { color: #cdf7dc; }
 .model-empty { color: var(--faint); font-size: 13px; padding: 24px 0; text-align: center; }
-/* Ticks sit under the bar area only: the label column (150px) and value column (84px) are excluded. */
+/* Ticks sit under the bar area only: the label column (140px) and value column (98px) are excluded. */
 .model-axis {
   position: relative;
   height: 16px;
-  margin: 12px 96px 0 162px;
+  margin: 12px 110px 0 152px;
   font-size: 11px;
   color: var(--faint);
   font-variant-numeric: tabular-nums;

@@ -38,6 +38,7 @@ internal sealed class MainForm : Form
     private readonly Panel _titleBar = new() { Dock = DockStyle.Top, Height = 36, BackColor = StripBackground };
     private readonly Button _maximizeButton = new();
     private readonly Button _pinButton = new();
+    private readonly Label _subtitleLabel = new();
     private readonly WebView2 _web = new() { Dock = DockStyle.Fill, Visible = false };
     private readonly NotifyIcon _tray = new();
     private readonly Label _status = new()
@@ -52,7 +53,8 @@ internal sealed class MainForm : Form
 
     private Rectangle _normalBounds;
     private bool _miniMode;
-    private bool _minimizeToTrayOnClose;
+    private bool _minimizeToTrayOnClose = true;
+    private bool _shownTrayBalloon;
     private bool _allowExit;
 
     private static string ResolveDataRoot()
@@ -89,14 +91,18 @@ internal sealed class MainForm : Form
             if (!_allowExit && _minimizeToTrayOnClose && args.CloseReason == CloseReason.UserClosing)
             {
                 args.Cancel = true;
-                Hide();
+                HideToTray();
                 return;
             }
             _tray.Visible = false;
             _tray.Dispose();
             _serverHost.Dispose();
         };
-        Resize += (_, _) => UpdateMaximizeButton();
+        Resize += (_, _) =>
+        {
+            UpdateMaximizeButton();
+            _subtitleLabel.Visible = !_miniMode && Width >= 760;
+        };
     }
 
     // Paints the window border in the HUD's dark navy instead of the Windows accent colour.
@@ -178,34 +184,53 @@ internal sealed class MainForm : Form
             e.Graphics.DrawLine(pen, 0, _titleBar.Height - 1, _titleBar.Width, _titleBar.Height - 1);
         };
 
+        var leftFlow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            AutoSize = false,
+            Padding = new Padding(10, 6, 0, 0),
+            Margin = Padding.Empty,
+            BackColor = Color.Transparent,
+        };
+
         var appIcon = new PictureBox
         {
-            Image = Icon?.ToBitmap(), SizeMode = PictureBoxSizeMode.StretchImage,
-            Size = new Size(20, 20), Location = new Point(12, 8), BackColor = Color.Transparent,
+            Image = Icon?.ToBitmap(),
+            SizeMode = PictureBoxSizeMode.StretchImage,
+            Size = new Size(20, 20),
+            Margin = new Padding(2, 2, 8, 0),
+            BackColor = Color.Transparent,
         };
         var title = new Label
         {
-            Text = "AERUS AI USAGE HUD", AutoSize = true,
-            Font = new Font("Segoe UI Semibold", 9f), ForeColor = Cyan,
-            BackColor = Color.Transparent, Location = new Point(42, 10),
+            Text = "AERUS AI USAGE HUD",
+            AutoSize = true,
+            Font = new Font("Segoe UI Semibold", 9f),
+            ForeColor = Cyan,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0, 3, 10, 0),
         };
-        var subtitle = new Label
-        {
-            Text = "Unified token tracking for Codex, Claude && Ollama", AutoSize = true,
-            Font = new Font("Segoe UI", 8f), ForeColor = MutedText,
-            BackColor = Color.Transparent, Location = new Point(206, 11),
-        };
-        _titleBar.Controls.Add(appIcon);
-        _titleBar.Controls.Add(title);
-        _titleBar.Controls.Add(subtitle);
+        _subtitleLabel.Text = "Unified token tracking for Codex, Claude && Ollama";
+        _subtitleLabel.AutoSize = true;
+        _subtitleLabel.Font = new Font("Segoe UI", 8f);
+        _subtitleLabel.ForeColor = MutedText;
+        _subtitleLabel.BackColor = Color.Transparent;
+        _subtitleLabel.Margin = new Padding(0, 4, 0, 0);
+
+        leftFlow.Controls.Add(appIcon);
+        leftFlow.Controls.Add(title);
+        leftFlow.Controls.Add(_subtitleLabel);
         MakeDraggable(_titleBar);
+        MakeDraggable(leftFlow);
         MakeDraggable(appIcon);
         MakeDraggable(title);
-        MakeDraggable(subtitle);
+        MakeDraggable(_subtitleLabel);
 
         var controls = new FlowLayoutPanel
         {
-            Dock = DockStyle.Right, Width = 184, Height = 36, FlowDirection = FlowDirection.RightToLeft,
+            Dock = DockStyle.Right, Width = 230, Height = 36, FlowDirection = FlowDirection.RightToLeft,
             WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty, BackColor = Color.Transparent,
         };
         var close = CreateWindowButton("×", "Close", 13);
@@ -216,13 +241,17 @@ internal sealed class MainForm : Form
         _maximizeButton.Click += (_, _) => ToggleMaximize();
         var minimize = CreateWindowButton("—", "Minimize", 10);
         minimize.Click += (_, _) => WindowState = FormWindowState.Minimized;
+        var trayBtn = CreateWindowButton("▽", "Minimize to System Tray", 9);
+        trayBtn.Click += (_, _) => HideToTray();
         StyleWindowButton(_pinButton, "Pin Always on Top", 10);
         _pinButton.Text = "⊤";
         _pinButton.Click += (_, _) => ToggleTopMost();
         controls.Controls.Add(close);
         controls.Controls.Add(_maximizeButton);
         controls.Controls.Add(minimize);
+        controls.Controls.Add(trayBtn);
         controls.Controls.Add(_pinButton);
+        _titleBar.Controls.Add(leftFlow);
         _titleBar.Controls.Add(controls);
         UpdateMaximizeButton();
         UpdatePinButton();
@@ -230,10 +259,22 @@ internal sealed class MainForm : Form
 
     private void BuildTrayIcon()
     {
-        _tray.Icon = Icon ?? SystemIcons.Application;
+        var iconPath = Path.Combine(_appRoot, "assets", "aerus-usage-hud.ico");
+        if (File.Exists(iconPath))
+        {
+            _tray.Icon = new Icon(iconPath, SystemInformation.SmallIconSize);
+        }
+        else
+        {
+            _tray.Icon = Icon ?? SystemIcons.Application;
+        }
         _tray.Text = WindowTitle;
         _tray.Visible = true;
         _tray.DoubleClick += (_, _) => RestoreWindow();
+        _tray.MouseClick += (_, args) =>
+        {
+            if (args.Button == MouseButtons.Left) RestoreWindow();
+        };
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open HUD", null, (_, _) => RestoreWindow());
@@ -264,6 +305,27 @@ internal sealed class MainForm : Form
             Close();
         });
         _tray.ContextMenuStrip = menu;
+    }
+
+    private void HideToTray()
+    {
+        Hide();
+        if (!_shownTrayBalloon)
+        {
+            _shownTrayBalloon = true;
+            try
+            {
+                _tray.ShowBalloonTip(
+                    2500,
+                    WindowTitle,
+                    "Minimized to the system tray (check the ^ icon near the clock). Left-click to reopen or right-click to exit.",
+                    ToolTipIcon.Info);
+            }
+            catch
+            {
+                // Ignore balloon errors if notifications are suppressed.
+            }
+        }
     }
 
     private static bool IsStartupEnabled()

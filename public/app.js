@@ -237,9 +237,11 @@ function fillCard(card, totals, cacheAvailable = true) {
       el.classList.add('na');
       el.title = 'Ollama captures do not record cache tokens';
     } else {
-      el.textContent = n(totals[field]);
+      const val = Number(totals[field]) || 0;
+      const useCompact = field !== 'total' && val >= 1_000_000;
+      el.textContent = useCompact ? compact(val) : n(val);
       el.classList.remove('na');
-      el.removeAttribute('title');
+      el.title = `${n(val)} tokens`;
     }
   }
 }
@@ -397,9 +399,15 @@ function renderChart(d) {
     })
     .join('');
 
-  const every = granularity === 'hour' ? 4 : Math.max(1, Math.ceil(labels.length / 8));
+  const maxTicks = labels.length > 14 ? 5 : 6;
+  const every = granularity === 'hour' ? 4 : Math.max(1, Math.ceil(labels.length / maxTicks));
   const ticks = labels
-    .map((key, i) => (i % every === 0 ? `<span style="left:${((i + 0.5) / labels.length) * 100}%">${esc(axisLabel(granularity, key))}</span>` : ''))
+    .map((key, i) => {
+      if (i % every !== 0) return '';
+      const pct = ((i + 0.5) / labels.length) * 100;
+      const align = pct < 6 ? 'transform:none' : pct > 94 ? 'transform:translateX(-100%)' : '';
+      return `<span style="left:${pct}%;${align}">${esc(axisLabel(granularity, key))}</span>`;
+    })
     .join('');
 
   chart.innerHTML = `
