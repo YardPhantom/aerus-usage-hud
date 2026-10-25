@@ -1,4 +1,5 @@
-// Codex CLI history: ~/.codex/sessions and archived_sessions (JSONL).
+// Codex CLI history: ~/.codex/sessions and archived_sessions (JSONL),
+// plus auto-discovered relocated Codex directories across mounted drives.
 // Each turn is read from last_token_usage (the per-turn delta). Cumulative totals are only used
 // as a fallback when no per-turn delta exists, so nothing is counted twice.
 import fs from 'node:fs';
@@ -7,23 +8,46 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { codexCost } from './pricing.js';
-import { isDirectory, listJsonl, normalizeModel, num, parseTime, projectFromCwd } from './util.js';
+import { isDirectory, listAvailableDrives, listJsonl, normalizeModel, num, parseTime, projectFromCwd } from './util.js';
 
 export function defaultCodexDir() {
   return process.env.AERUS_CODEX_DIR || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+}
+
+export function defaultCodexExtraDirs() {
+  if (process.env.AERUS_CODEX_DIR || process.env.CODEX_HOME) return [];
+  const candidates = [];
+  for (const drive of listAvailableDrives()) {
+    for (const rel of [['.codex'], ['Codex'], ['codex'], ['Backups', 'codex-sessions']]) {
+      const full = path.join(drive, ...rel);
+      if (!candidates.includes(full) && fs.existsSync(full)) {
+        candidates.push(full);
+      }
+    }
+  }
+  return candidates;
 }
 
 // Parsed file results, keyed by path, so unchanged sessions are not re-read on every open.
 const fileCache = new Map();
 
 export async function scanCodex(codexDir = defaultCodexDir()) {
-  const found = await isDirectory(codexDir);
-  if (!found) return { found, files: 0, events: [] };
+  const extraDirs = codexDir === defaultCodexDir() ? defaultCodexExtraDirs() : [];
+  const allDirs = [codexDir, ...extraDirs];
+  let anyFound = false;
+  const files = [];
 
-  const files = [
-    ...(await listJsonl(path.join(codexDir, 'sessions'))),
-    ...(await listJsonl(path.join(codexDir, 'archived_sessions'))),
-  ];
+  for (const dir of allDirs) {
+    if (await isDirectory(dir)) {
+      anyFound = true;
+      files.push(
+        ...(await listJsonl(path.join(dir, 'sessions'))),
+        ...(await listJsonl(path.join(dir, 'archived_sessions'))),
+      );
+    }
+  }
+  if (!anyFound) return { found: false, files: 0, events: [] };
+
   const seenSessions = new Set();
   const events = [];
 
@@ -45,7 +69,7 @@ export async function scanCodex(codexDir = defaultCodexDir()) {
     seenSessions.add(cached.session.sessionId);
     events.push(...cached.session.events);
   }
-  return { found, files: files.length, events };
+  return { found: anyFound, files: files.length, events };
 }
 
 async function parseCodexFile(file, codexDir) {

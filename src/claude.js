@@ -1,4 +1,5 @@
-// Claude Code history: ~/.claude/projects/**/*.jsonl (assistant messages carry a usage object).
+// Claude Code history: ~/.claude/projects/**/*.jsonl (assistant messages carry a usage object),
+// plus auto-discovered Claude transcript and backup directories across mounted drives.
 //
 // Two things matter here:
 // 1. Claude Code writes several records per API message while it streams. Records are keyed by
@@ -11,12 +12,38 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { claudeCost } from './pricing.js';
-import { isDirectory, listJsonl, normalizeModel, num, parseTime, projectFromCwd } from './util.js';
+import { isDirectory, listAvailableDrives, listJsonl, normalizeModel, num, parseTime, projectFromCwd } from './util.js';
 
 const LEDGER_VERSION = 1;
 
 export function defaultClaudeDir() {
   return process.env.AERUS_CLAUDE_DIR || process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+}
+
+// Auto-discovers relocated Claude folders and transcript backup directories across all mounted drives.
+export function defaultClaudeBackupDirs() {
+  const custom = process.env.AERUS_CLAUDE_BACKUP_DIR;
+  if (custom === 'off' || custom === '0') return [];
+  if (custom) return custom.split(path.delimiter).map((d) => d.trim()).filter(Boolean);
+  if (process.env.AERUS_CLAUDE_DIR || process.env.CLAUDE_CONFIG_DIR) return [];
+
+  const candidates = [];
+  for (const drive of listAvailableDrives()) {
+    for (const rel of [
+      ['Backups', 'claude-transcripts'],
+      ['backups', 'claude-transcripts'],
+      ['Claude', 'projects'],
+      ['Claude'],
+      ['.claude', 'projects'],
+      ['.claude'],
+    ]) {
+      const full = path.join(drive, ...rel);
+      if (!candidates.includes(full) && fs.existsSync(full)) {
+        candidates.push(full);
+      }
+    }
+  }
+  return candidates;
 }
 
 // Scans run one at a time, so two open tabs cannot write the ledger at the same time.
@@ -30,12 +57,45 @@ export function scanClaude(options) {
 
 const fileCache = new Map();
 
-async function scanClaudeNow({ claudeDir = defaultClaudeDir(), dataDir }) {
-  const projectsDir = path.join(claudeDir, 'projects');
-  const found = await isDirectory(projectsDir);
+async function resolveProjectScanDirs(claudeDir, backupDirs) {
+  const dirs = [];
+  const seen = new Set();
+  const addDir = (dir) => {
+    const norm = path.resolve(dir).toLowerCase();
+    if (!seen.has(norm)) {
+      seen.add(norm);
+      dirs.push(dir);
+    }
+  };
+
+  const primary = path.join(claudeDir, 'projects');
+  if (await isDirectory(primary)) addDir(primary);
+  else if (await isDirectory(claudeDir)) {
+    const direct = await listJsonl(claudeDir, 7);
+    if (direct.length) addDir(claudeDir);
+  }
+  for (const extra of backupDirs) {
+    const sub = path.join(extra, 'projects');
+    if (await isDirectory(sub)) {
+      addDir(sub);
+    } else if (await isDirectory(extra)) {
+      const hasJsonl = await listJsonl(extra, 7);
+      if (hasJsonl.length) addDir(extra);
+    }
+  }
+  return dirs;
+}
+
+async function scanClaudeNow({ claudeDir = defaultClaudeDir(), backupDirs = null, dataDir } = {}) {
+  const extraDirs = backupDirs ?? (claudeDir === defaultClaudeDir() ? defaultClaudeBackupDirs() : []);
+  const scanDirs = await resolveProjectScanDirs(claudeDir, extraDirs);
+  const found = scanDirs.length > 0;
   const ledgerFile = path.join(dataDir, 'claude-ledger.json');
   const ledger = await loadLedger(ledgerFile);
-  const files = found ? await listJsonl(projectsDir) : [];
+  const files = [];
+  for (const dir of scanDirs) {
+    files.push(...(await listJsonl(dir)));
+  }
 
   let changed = false;
   for (const file of files) {
@@ -46,7 +106,7 @@ async function scanClaudeNow({ claudeDir = defaultClaudeDir(), dataDir }) {
   if (changed) await saveLedger(ledgerFile, ledger);
 
   const events = Object.values(ledger.records).map(toEvent);
-  return { found, files: files.length, events, ledgerRecords: events.length };
+  return { found, files: files.length, scanDirs, events, ledgerRecords: events.length };
 }
 
 // Returns true when the stored record was added or replaced.

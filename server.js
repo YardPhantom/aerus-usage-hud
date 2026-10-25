@@ -5,9 +5,9 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { scanCodex, defaultCodexDir } from './src/codex.js';
-import { scanClaude, defaultClaudeDir } from './src/claude.js';
+import { scanClaude, defaultClaudeDir, defaultClaudeBackupDirs } from './src/claude.js';
 import { readAccountUsage } from './src/codex-account.js';
-import { readLocalOllamaUsage } from './src/local-ollama.js';
+import { readLocalOllamaUsage, defaultOllamaModelsDir } from './src/local-ollama.js';
 import { loadStore, saveStore, recordSnapshot } from './src/account-store.js';
 import { computeCodexTotals, computeOllamaTotal, ollamaEvents } from './src/totals.js';
 import { buildView, RANGES } from './src/aggregate.js';
@@ -57,7 +57,7 @@ function recordOllama(store, ollama) {
   if (!ollama?.available) return false;
   const observed = Math.round(ollama.totalTokens);
   const total = Math.max(observed, store.ollama?.total ?? 0);
-  store.ollama = { total, observedAt: new Date().toISOString(), source: 'local Ollama adapter captures' };
+  store.ollama = { total, observedAt: new Date().toISOString(), source: 'local Ollama logs and captures' };
   return true;
 }
 
@@ -191,7 +191,8 @@ console.log('\nAERUS AI USAGE HUD');
 console.log('Local logs stay on this computer.\n');
 console.log(`Dashboard  ${url}`);
 console.log(`Codex      ${defaultCodexDir()}`);
-console.log(`Claude     ${path.join(defaultClaudeDir(), 'projects')}`);
+console.log(`Claude     ${[path.join(defaultClaudeDir(), 'projects'), ...defaultClaudeBackupDirs()].join(' ; ')}`);
+console.log(`Ollama     ${defaultOllamaModelsDir()}`);
 console.log(`Data       ${DATA_DIR}\n`);
 if (SHOULD_OPEN) openBrowser(url);
 

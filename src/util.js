@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
@@ -61,4 +62,29 @@ export async function listJsonl(dir, depth = 0) {
     else if (entry.isFile() && entry.name.toLowerCase().endsWith('.jsonl')) found.push(full);
   }
   return found;
+}
+
+// Discovers mounted drive roots (Windows C:\..Z:\ or custom AERUS_DRIVES) for secondary storage scanning.
+export function listAvailableDrives() {
+  const custom = process.env.AERUS_DRIVES;
+  if (custom === 'off' || custom === '0') return [];
+  if (custom) {
+    return custom
+      .split(path.delimiter)
+      .map((d) => d.trim())
+      .filter(Boolean);
+  }
+  if (process.platform !== 'win32') return [];
+  const drives = [];
+  for (let code = 67; code <= 90; code += 1) {
+    const root = `${String.fromCharCode(code)}:\\`;
+    try {
+      if (fs.existsSync(root) && fs.statSync(root).isDirectory()) {
+        drives.push(root);
+      }
+    } catch {
+      // Unready or inaccessible drive letter.
+    }
+  }
+  return drives;
 }

@@ -235,3 +235,88 @@ test('an existing snapshot is restored after a restart with no online lookup', a
   assert.equal(view.allTime.codex.snapshot.lifetimeTokens, 1_000);
   assert.equal(view.allTime.codex.localTotal, 100);
 });
+
+
+test('Claude backup directories on secondary drives are merged and deduplicated by message id', async () => {
+  const profile = profileRoot('claude-backup');
+  const claudeDir = path.join(profile, 'claude');
+  const backupDir = path.join(profile, 'secondary-drive', 'Backups', 'claude-transcripts');
+  const dataDir = path.join(profile, 'hud-data');
+  writeClaudeMessage(claudeDir, { id: 'm1', output: 40 });
+  writeClaudeMessage(claudeDir, { id: 'm2', output: 60 });
+  const backupProj = path.join(backupDir, 'Work Backup');
+  fs.mkdirSync(backupProj, { recursive: true });
+  const backupLine = (id, output) =>
+    JSON.stringify({
+      type: 'assistant',
+      sessionId: 'claude-backup-session',
+      cwd: 'D:\\Workspace\\Demo',
+      timestamp: new Date().toISOString(),
+      message: { id, model: 'claude-sonnet-4-5', usage: { input_tokens: 10, output_tokens: output, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+    });
+  fs.writeFileSync(path.join(backupProj, 'old.jsonl'), [backupLine('m1', 40), backupLine('m0', 100)].join('\n') + '\n');
+
+  const scan = await scanClaude({ claudeDir, backupDirs: [backupDir], dataDir });
+  assert.equal(scan.found, true);
+  assert.equal(scan.events.length, 3, 'm0, m1, and m2 counted once each');
+  const totalOutput = scan.events.reduce((s, e) => s + e.output, 0);
+  assert.equal(totalOutput, 40 + 60 + 100);
+});
+
+test('Ollama server logs and secondary drive model manifests are auto-discovered, parsed and deduplicated', async () => {
+  const profile = profileRoot('ollama-server-logs');
+  const fakeDrive = path.join(profile, 'DriveD');
+  const modelsDir = path.join(fakeDrive, 'OllamaModels');
+  const manifestDir = path.join(modelsDir, 'manifests', 'registry.ollama.ai', 'library', 'qwen3-coder');
+  const logDir = path.join(fakeDrive, 'Ollama', 'logs');
+  fs.mkdirSync(manifestDir, { recursive: true });
+  fs.mkdirSync(logDir, { recursive: true });
+
+  const digest = 'sha256:d214b44b2401b1a933c43db24f086cff2472106b496df08346a4f4a541df4b4f';
+  const blobName = digest.replace(':', '-');
+  fs.writeFileSync(
+    path.join(manifestDir, '30b'),
+    JSON.stringify({
+      layers: [{ mediaType: 'application/vnd.ollama.image.model', digest }],
+    }),
+  );
+
+  const logContent = [
+    `time=2026-10-24T15:24:01.395-07:00 level=INFO source=server.go:107 msg="using llama-server for model" model=D:\\OllamaModels\\blobs\\${blobName}`,
+    'slot print_timing: id  0 | task 0 | prompt eval time =   1200.50 ms /   400 tokens (    3.00 ms per token,   333.19 tokens per second)',
+    'slot print_timing: id  0 | task 0 |        eval time =   2400.25 ms /   120 tokens (   20.00 ms per token,    50.00 tokens per second)',
+    '[GIN] 2026/10/24 - 15:24:05 | 200 |            4s |       127.0.0.1 | POST     "/api/chat"',
+  ].join('\n');
+  fs.writeFileSync(path.join(logDir, 'server.log'), logContent + '\n');
+  fs.writeFileSync(path.join(logDir, 'server-1.log'), logContent + '\n');
+
+  const savedDrives = process.env.AERUS_DRIVES;
+  const savedLocalAppData = process.env.LOCALAPPDATA;
+  const savedOllamaModels = process.env.OLLAMA_MODELS;
+  process.env.AERUS_DRIVES = fakeDrive;
+  process.env.LOCALAPPDATA = path.join(profile, 'empty-localappdata');
+  delete process.env.OLLAMA_MODELS;
+  delete process.env.AERUS_OLLAMA_MODELS_DIR;
+  delete process.env.AERUS_OLLAMA_LOG_DIR;
+  process.env.CODEX_HOME = path.join(profile, 'empty-codex');
+  delete process.env.AERU_OLLAMA_CAPTURE_DIR;
+  try {
+    ollamaCase += 1;
+    const mod = await import(`../src/local-ollama.js?case=${ollamaCase}`);
+    const usage = await mod.readLocalOllamaUsage();
+    assert.equal(usage.available, true);
+    assert.equal(usage.responses, 1);
+    assert.equal(usage.inputTokens, 400);
+    assert.equal(usage.outputTokens, 120);
+    assert.equal(usage.totalTokens, 520);
+    assert.equal(usage.models[0].name, 'qwen3-coder:30b');
+  } finally {
+    if (savedDrives === undefined) delete process.env.AERUS_DRIVES;
+    else process.env.AERUS_DRIVES = savedDrives;
+    if (savedLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = savedLocalAppData;
+    if (savedOllamaModels === undefined) delete process.env.OLLAMA_MODELS;
+    else process.env.OLLAMA_MODELS = savedOllamaModels;
+    delete process.env.CODEX_HOME;
+  }
+});
