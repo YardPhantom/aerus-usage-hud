@@ -1,7 +1,7 @@
 // Aerus AI Usage HUD. Fetches /api/usage and draws the dashboard. Nothing here is sent anywhere else.
 const state = {
-  range: 'today',
-  offset: 0,
+  range: new URLSearchParams(window.location.search).get('range') || 'today',
+  offset: Number(new URLSearchParams(window.location.search).get('offset')) || 0,
   data: null,
   showAll: false,
   breakdownMode: 'models', // 'models' | 'projects'

@@ -19,9 +19,9 @@ Stop jumping between tools just to understand your activity. Keep the informatio
 
 ## 🖥️ Preview
 
-*Application screenshot coming soon.*
+![Aerus AI Usage HUD 30-Day Dashboard Preview](./assets/dashboard-preview.png)
 
-The HUD is designed to provide a clean, convenient view of supported AI usage information without interrupting your development workflow.
+The HUD provides a clean, unified view of AI token usage, prompt cache hit rates, model/project proportion, and GPU throughput without interrupting your development workflow.
 
 ---
 
