@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
-import { discoverDriveDirs, pruneMapKeys } from './util.js';
+import { discoverDriveDirs, num, pruneMapKeys } from './util.js';
 
 const RAW_CAPTURE_SUFFIX = 'RAW-UPSTREAM-SSE.txt';
 const SERVER_LOG_PATTERN = /^server(-\d+)?\.log$/i;
@@ -18,6 +18,8 @@ let cachedResult = null;
 function homeDir() {
   return process.env.USERPROFILE || process.env.HOME || os.homedir() || '';
 }
+
+const nonNeg = (value) => Math.max(0, num(value));
 
 function captureDirs() {
   if (process.env.AERU_OLLAMA_CAPTURE_DIR) return [process.env.AERU_OLLAMA_CAPTURE_DIR];
@@ -80,21 +82,6 @@ export function defaultOllamaLogsDirs() {
   );
 }
 
-function number(value) {
-  const n = Number(value);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
-}
-
-function dateFromName(name) {
-  const match = name.match(/^\d+-([0-9]{4}-[0-9]{2}-[0-9]{2})T/);
-  return match ? match[1] : null;
-}
-
-function dateFromMs(ms) {
-  const d = new Date(ms);
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-}
-
 // Capture names look like 0001-2026-09-20T19-36-30-854Z-RAW-UPSTREAM-SSE.txt (UTC time of the response).
 function timeFromName(name) {
   const match = name.match(/^\d+-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z/);
@@ -106,7 +93,7 @@ function timeFromName(name) {
 async function readCapture(file, name) {
   // The time comes from the file name when it has one, otherwise from the file's last-modified time.
   const stat = await fsp.stat(file);
-  const result = { inputTokens: 0, outputTokens: 0, totalTokens: 0, responses: 0, model: 'unknown', date: dateFromName(name), at: timeFromName(name) ?? stat.mtimeMs };
+  const result = { inputTokens: 0, outputTokens: 0, totalTokens: 0, responses: 0, model: 'unknown', at: timeFromName(name) ?? stat.mtimeMs };
   let latest = null;
   const input = fs.createReadStream(file, { encoding: 'utf8' });
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
@@ -124,9 +111,9 @@ async function readCapture(file, name) {
 
   const usage = latest?.usage;
   if (!usage || typeof usage !== 'object') return result;
-  result.inputTokens = number(usage.input_tokens ?? usage.prompt_tokens);
-  result.outputTokens = number(usage.output_tokens ?? usage.completion_tokens);
-  result.totalTokens = number(usage.total_tokens) || result.inputTokens + result.outputTokens;
+  result.inputTokens = nonNeg(usage.input_tokens ?? usage.prompt_tokens);
+  result.outputTokens = nonNeg(usage.output_tokens ?? usage.completion_tokens);
+  result.totalTokens = nonNeg(usage.total_tokens) || result.inputTokens + result.outputTokens;
   result.model = typeof latest.model === 'string' && latest.model ? latest.model : 'unknown';
   if (result.totalTokens > 0) result.responses = 1;
   return result;
@@ -240,16 +227,16 @@ async function readServerLog(file, blobToModels) {
       if (line.includes('eval time =')) {
         const pMatch = line.match(/prompt eval time\s*=\s*([\d.]+)\s*ms\s*\/\s*(\d+)\s*tokens/);
         if (pMatch) {
-          pendingPromptMs = number(pMatch[1]);
-          pendingPrompt = number(pMatch[2]);
+          pendingPromptMs = nonNeg(pMatch[1]);
+          pendingPrompt = nonNeg(pMatch[2]);
           pendingPromptSig = `${pMatch[1]}:${pMatch[2]}`;
           continue;
         }
         const eMatch = line.match(/(?<!prompt )eval time\s*=\s*([\d.]+)\s*ms\s*\/\s*(\d+)\s*tokens(?:\s*\([^,]*,\s*([\d.]+)\s*tokens per second\))?/);
         if (eMatch) {
-          const evalMs = number(eMatch[1]);
-          const outputTokens = number(eMatch[2]);
-          const reportedTps = number(eMatch[3]);
+          const evalMs = nonNeg(eMatch[1]);
+          const outputTokens = nonNeg(eMatch[2]);
+          const reportedTps = nonNeg(eMatch[3]);
           const tokensPerSec = reportedTps || (evalMs > 0 && outputTokens > 0 ? (outputTokens / evalMs) * 1000 : 0);
           const inputTokens = pendingPrompt;
           const totalTokens = inputTokens + outputTokens;
@@ -258,7 +245,6 @@ async function readServerLog(file, blobToModels) {
             records.push({
               key,
               at: currentTime,
-              date: dateFromMs(currentTime),
               model: currentModel,
               input: inputTokens,
               output: outputTokens,
@@ -290,7 +276,6 @@ function summarize(files, logFiles) {
     outputTokens: 0,
     totalTokens: 0,
     models: [],
-    dailyUsageBuckets: [],
     records: [],
     telemetry: {
       avgTokensPerSec: 0,
@@ -301,7 +286,6 @@ function summarize(files, logFiles) {
     },
   };
   const models = new Map();
-  const days = new Map();
   let timedOutputTokens = 0;
   let timedEvalMs = 0;
   let peakTps = 0;
@@ -314,7 +298,6 @@ function summarize(files, logFiles) {
     summary.outputTokens += entry.usage.outputTokens;
     summary.totalTokens += entry.usage.totalTokens;
     models.set(entry.usage.model, (models.get(entry.usage.model) || 0) + entry.usage.totalTokens);
-    if (entry.usage.date) days.set(entry.usage.date, (days.get(entry.usage.date) || 0) + entry.usage.totalTokens);
     if (entry.usage.at != null) {
       summary.records.push({
         at: entry.usage.at,
@@ -340,7 +323,6 @@ function summarize(files, logFiles) {
       summary.outputTokens += rec.output;
       summary.totalTokens += rec.total;
       models.set(rec.model, (models.get(rec.model) || 0) + rec.total);
-      if (rec.date) days.set(rec.date, (days.get(rec.date) || 0) + rec.total);
       if (rec.evalMs > 0 && rec.output > 0) {
         timedOutputTokens += rec.output;
         timedEvalMs += rec.evalMs;
@@ -370,7 +352,6 @@ function summarize(files, logFiles) {
   };
 
   summary.models = [...models.entries()].map(([name, tokens]) => ({ name, tokens })).sort((a, b) => b.tokens - a.tokens);
-  summary.dailyUsageBuckets = [...days.entries()].map(([startDate, tokens]) => ({ startDate, tokens })).sort((a, b) => a.startDate.localeCompare(b.startDate));
   return summary;
 }
 
@@ -390,11 +371,9 @@ export async function readOllamaLiveStatus() {
       running: true,
       models: list.map((m) => ({
         name: m.name || m.model || 'unknown',
-        sizeBytes: number(m.size),
-        sizeVramBytes: number(m.size_vram),
+        sizeBytes: nonNeg(m.size),
+        sizeVramBytes: nonNeg(m.size_vram),
         quantization: m.details?.quantization_level || null,
-        parameterSize: m.details?.parameter_size || null,
-        contextLength: number(m.context_length),
       })),
     };
   } catch {
@@ -466,7 +445,7 @@ export async function readLocalOllamaUsage() {
   }
 
   if (!foundAnySource) {
-    const result = { available: false, reason: 'Local Ollama logs or captures were not found.', captureFiles: 0, responses: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, models: [], dailyUsageBuckets: [] };
+    const result = { available: false, reason: 'Local Ollama logs or captures were not found.', captureFiles: 0, responses: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, models: [] };
     cachedResult = result;
     cachedAt = Date.now();
     return result;

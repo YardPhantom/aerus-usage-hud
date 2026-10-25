@@ -89,26 +89,12 @@ function readWithCodex(executable) {
           child.stdin.write(`${JSON.stringify({ method: 'initialized', params: {} })}\n`);
           child.stdin.write(`${JSON.stringify({ method: 'account/usage/read', id: 2 })}\n`);
         } else if (message.id === 2 && initialized) {
-          const summary = message.result?.summary;
-          const lifetimeTokens = Number(summary?.lifetimeTokens);
+          const lifetimeTokens = Number(message.result?.summary?.lifetimeTokens);
           if (message.error || !Number.isFinite(lifetimeTokens) || lifetimeTokens < 0) {
             finish({ available: false, reason: 'Codex account usage is unavailable for the current sign-in; showing local history.' });
             return;
           }
-          const dailyUsageBuckets = Array.isArray(message.result.dailyUsageBuckets)
-            ? message.result.dailyUsageBuckets
-                .filter((bucket) => /^\d{4}-\d{2}-\d{2}$/.test(bucket?.startDate) && Number.isFinite(Number(bucket.tokens)))
-                .map((bucket) => ({ startDate: bucket.startDate, tokens: Number(bucket.tokens) }))
-            : [];
-          finish({
-            available: true,
-            lifetimeTokens,
-            peakDailyTokens: Number.isFinite(Number(summary.peakDailyTokens)) ? Number(summary.peakDailyTokens) : null,
-            longestRunningTurnSec: Number.isFinite(Number(summary.longestRunningTurnSec)) ? Number(summary.longestRunningTurnSec) : null,
-            currentStreakDays: Number.isFinite(Number(summary.currentStreakDays)) ? Number(summary.currentStreakDays) : null,
-            longestStreakDays: Number.isFinite(Number(summary.longestStreakDays)) ? Number(summary.longestStreakDays) : null,
-            dailyUsageBuckets,
-          });
+          finish({ available: true, lifetimeTokens });
         }
       }
     });

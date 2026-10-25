@@ -223,8 +223,6 @@ export function buildView({
     efficiency: {
       cacheHitRate: hitRate(totals.input, totals.cacheRead),
       cacheSavedUsd: totalCacheSavedUsd,
-      codexCacheSavedUsd: cacheSavings.codex,
-      claudeCacheSavedUsd: cacheSavings.claude,
       ollamaCloudEquivalentUsd: ollamaEquivalentUsd,
       ollamaTelemetry: {
         avgTokensPerSec: ollamaTimedEvalMs > 0 ? Number(((ollamaTimedOutput / ollamaTimedEvalMs) * 1000).toFixed(1)) : 0,

@@ -78,7 +78,6 @@ export function computeOllamaTotal({ events, stored = null, observedAt = null })
   const storedTotal = stored?.total ?? 0;
   return {
     total: Math.max(captured, storedTotal),
-    capturedTotal: captured,
     storedFloorApplied: storedTotal > captured,
     observedAt,
   };
