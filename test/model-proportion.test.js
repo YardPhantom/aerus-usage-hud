@@ -149,3 +149,58 @@ test('buildView calculates prompt cache hit rate, cache savings USD, and Ollama 
   assert.equal(view.efficiency.ollamaTelemetry.avgTokensPerSec, 50);
   assert.equal(view.efficiency.ollamaTelemetry.peakTokensPerSec, 50);
 });
+
+
+test('inspectSession builds chronological turn-by-turn timeline with cumulative totals and cache hit rate', async () => {
+  const { inspectSession } = await import('../src/aggregate.js');
+  const events = [
+    {
+      provider: 'claude',
+      at: NOW - 20_000,
+      sessionId: 'sess-99',
+      project: 'demo-proj',
+      model: 'claude-sonnet-4-5',
+      input: 200,
+      output: 100,
+      cacheRead: 800,
+      cacheWrite: 0,
+      total: 1100,
+      cost: 0.01,
+    },
+    {
+      provider: 'claude',
+      at: NOW - 60_000,
+      sessionId: 'sess-99',
+      project: 'demo-proj',
+      model: 'claude-sonnet-4-5',
+      input: 500,
+      output: 100,
+      cacheRead: 0,
+      cacheWrite: 500,
+      total: 1100,
+      cost: 0.01,
+    },
+  ];
+  const inspected = inspectSession(events, 'claude', 'sess-99');
+  assert.equal(inspected.turnCount, 2);
+  assert.equal(inspected.turns[0].turn, 1);
+  assert.equal(inspected.turns[0].cumulativeTotal, 1100);
+  assert.equal(inspected.turns[1].turn, 2);
+  assert.equal(inspected.turns[1].cumulativeTotal, 2200);
+  assert.equal(inspected.totals.total, 2200);
+});
+
+test('buildView computes 364-day activity heatmap, streaks, peak day, and busiest hour', () => {
+  const dayMs = 86_400_000;
+  const events = [
+    ev('claude', 'claude-sonnet-4-5', 500, NOW - 2 * dayMs),
+    ev('claude', 'claude-sonnet-4-5', 1500, NOW - dayMs),
+    ev('codex', 'gpt-5', 800, NOW - 60_000),
+  ];
+  const view = buildView({ events, range: '7d', offset: 0, now: NOW });
+  assert.equal(view.activity.heatmap.length, 364);
+  assert.equal(view.activity.currentStreakDays, 3);
+  assert.equal(view.activity.longestStreakDays, 3);
+  assert.equal(view.activity.peakDay.total, 1500);
+  assert.equal(typeof view.activity.busiestHour, 'number');
+});

@@ -150,6 +150,7 @@ export function toEvent(rec) {
   };
 }
 
+// Reads usage records from a .jsonl file, using incremental byte-offset tailing when an existing file grows.
 async function readFileRecords(file) {
   let stat;
   try {
@@ -157,13 +158,17 @@ async function readFileRecords(file) {
   } catch {
     return [];
   }
-  const key = `${stat.mtimeMs}:${stat.size}`;
   const cached = fileCache.get(file);
-  if (cached && cached.key === key) return cached.records;
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.records;
+  }
 
-  const records = [];
+  const canTail = cached && stat.size > cached.size;
+  const startOffset = canTail ? cached.size : 0;
+  const records = canTail ? [...cached.records] : [];
+
   try {
-    const stream = fs.createReadStream(file, { encoding: 'utf8' });
+    const stream = fs.createReadStream(file, { encoding: 'utf8', start: startOffset });
     const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
     for await (const line of lines) {
       if (!line.includes('"usage"')) continue;
@@ -177,9 +182,9 @@ async function readFileRecords(file) {
       if (rec) records.push(rec);
     }
   } catch {
-    return [];
+    return cached ? cached.records : [];
   }
-  fileCache.set(file, { key, records });
+  fileCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, records });
   return records;
 }
 

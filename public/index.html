@@ -97,10 +97,11 @@
       <article class="card ollama clickable-card" id="kpi-ollama" data-provider-filter="ollama" title="Click to filter sessions by Ollama">
         <div class="card-head">
           <span class="badge ollama-badge" aria-hidden="true"></span>
-          <div>
+          <div class="card-head-title">
             <p class="eyebrow">Ollama total</p>
             <p class="figure"><span data-field="total">0</span> <small>tokens</small></p>
           </div>
+          <button type="button" class="vram-btn" id="unload-vram" hidden title="Unload models from GPU VRAM">Free VRAM</button>
         </div>
         <div class="mini">
           <div><b data-field="input">0</b><span>Input</span></div>
@@ -127,20 +128,33 @@
 
       <article class="panel wide">
         <header class="panel-head">
-          <h2>Usage over time</h2>
-          <div class="legend-inline">
-            <span class="codex-key"><span class="swatch"></span>Codex</span>
-            <span class="claude-key"><span class="swatch"></span>Claude</span>
-            <span class="ollama-key"><span class="swatch"></span>Ollama</span>
+          <div>
+            <h2>Usage over time</h2>
+            <p class="subtle" id="activity-strip"></p>
+          </div>
+          <div class="chart-head-controls">
+            <div class="legend-inline">
+              <span class="codex-key"><span class="swatch"></span>Codex</span>
+              <span class="claude-key"><span class="swatch"></span>Claude</span>
+              <span class="ollama-key"><span class="swatch"></span>Ollama</span>
+            </div>
+            <div class="mini-tabs" role="tablist" aria-label="Chart mode">
+              <button type="button" class="mini-tab active" data-chart-mode="bars">Bars</button>
+              <button type="button" class="mini-tab" data-chart-mode="heatmap">365d Heatmap</button>
+            </div>
           </div>
         </header>
         <div class="chart" id="chart"></div>
+        <div class="heatmap-wrap" id="heatmap-wrap" hidden></div>
       </article>
 
       <article class="panel">
         <header class="panel-head">
           <h2>Estimated API cost (USD)</h2>
-          <span class="cache-pill" id="cache-savings-pill" hidden></span>
+          <div class="cost-head-badges">
+            <span class="cache-pill" id="cache-savings-pill" hidden></span>
+            <button type="button" class="mini-tab budget-btn" id="budget-btn" title="Set soft daily API cost alert threshold">Budget</button>
+          </div>
         </header>
         <ul class="cost-list">
           <li class="codex-key">
@@ -168,6 +182,14 @@
             <small data-cost-tokens="grand"></small>
           </li>
         </ul>
+        <div class="budget-bar-wrap" id="budget-bar-wrap" hidden>
+          <div class="budget-bar-labels">
+            <span id="budget-label-left"></span>
+            <span id="budget-label-right"></span>
+          </div>
+          <div class="budget-track"><div class="budget-fill" id="budget-fill"></div></div>
+        </div>
+        <p class="roi-note" id="roi-note"></p>
         <p class="fine">Estimates use public list prices. Actual costs may differ, and subscription plans are not billed per token. Ollama runs locally, so its cost is $0.00 here. Electricity and hardware are not included. Account-only Codex usage has no per-token split, so it is not priced.</p>
       </article>
     </section>
@@ -192,6 +214,7 @@
       <header class="panel-head sessions-head">
         <div class="sessions-title-group">
           <h2>Recent sessions</h2>
+          <span class="subtle">Click a session row to inspect turn-by-turn history</span>
           <button type="button" class="filter-pill" id="active-filter" hidden title="Click to clear filter"></button>
         </div>
         <div class="sessions-actions">
@@ -226,9 +249,40 @@
     <footer class="foot">
       <span><i class="dot ok"></i>Local usage database</span>
       <span id="foot-sources"></span>
-      <span>v1.1.0</span>
+      <span>v1.2.0</span>
       <span class="brand-foot">Aerus Creations &nbsp;|&nbsp; A higher kind of intelligence</span>
     </footer>
+  </div>
+
+  <div class="modal-backdrop" id="session-modal" hidden>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <header class="modal-head">
+        <div>
+          <h2 id="modal-title">Session Inspector</h2>
+          <p class="subtle" id="modal-subtitle"></p>
+        </div>
+        <button type="button" class="ghost" id="close-modal">Close ×</button>
+      </header>
+      <div class="modal-kpis" id="modal-kpis"></div>
+      <div class="modal-timeline" id="modal-timeline"></div>
+      <div class="modal-table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th class="num">Turn</th>
+              <th>Time</th>
+              <th>Model</th>
+              <th class="num">Fresh Input</th>
+              <th class="num">Cache Read</th>
+              <th class="num">Output</th>
+              <th class="num">Turn Total</th>
+              <th class="num">Cumulative</th>
+            </tr>
+          </thead>
+          <tbody id="modal-turns"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
   <div class="tooltip" id="tooltip" hidden></div>

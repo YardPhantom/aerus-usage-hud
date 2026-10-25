@@ -11,7 +11,7 @@ const CACHE_MS = 10_000;
 const cachedFiles = new Map();
 const cachedLogFiles = new Map();
 let cachedManifestKey = '';
-let cachedBlobToModels = new Map();
+let cachedManifestData = { blobToModels: new Map(), installedModels: [], totalDiskBytes: 0 };
 let cachedAt = 0;
 let cachedResult = null;
 
@@ -91,7 +91,6 @@ function timeFromName(name) {
 }
 
 async function readCapture(file, name) {
-  // The time comes from the file name when it has one, otherwise from the file's last-modified time.
   const stat = await fsp.stat(file);
   const result = { inputTokens: 0, outputTokens: 0, totalTokens: 0, responses: 0, model: 'unknown', at: timeFromName(name) ?? stat.mtimeMs };
   let latest = null;
@@ -119,8 +118,9 @@ async function readCapture(file, name) {
   return result;
 }
 
-// Maps blob sha256-<hash> identifiers across all discovered Ollama model roots to human-readable model names.
-async function loadBlobModelMap(modelsRoots) {
+// Maps blob sha256-<hash> identifiers across all discovered Ollama model roots to human-readable model names
+// and calculates per-model and unique blob disk usage.
+async function loadManifestCatalog(modelsRoots) {
   const sigParts = [];
   for (const root of modelsRoots) {
     try {
@@ -131,9 +131,12 @@ async function loadBlobModelMap(modelsRoots) {
     }
   }
   const sig = sigParts.join('|');
-  if (sig && sig === cachedManifestKey) return cachedBlobToModels;
+  if (sig && sig === cachedManifestKey) return cachedManifestData;
 
   const blobToModels = new Map();
+  const modelSizes = new Map();
+  const uniqueBlobSizes = new Map();
+
   async function walkManifests(dir, relParts = []) {
     let entries;
     try {
@@ -156,11 +159,20 @@ async function loadBlobModelMap(modelsRoots) {
             if (fromLayer) label = fromLayer.from;
           }
           const digests = [];
+          let modelBytes = nonNeg(data.config?.size);
           if (data.config?.digest) digests.push(data.config.digest);
           for (const layer of data.layers || []) {
-            if (layer?.digest && (!layer.mediaType || layer.mediaType.includes('model'))) {
-              digests.push(layer.digest);
+            const sz = nonNeg(layer?.size);
+            modelBytes += sz;
+            if (layer?.digest) {
+              uniqueBlobSizes.set(layer.digest, Math.max(uniqueBlobSizes.get(layer.digest) || 0, sz));
+              if (!layer.mediaType || layer.mediaType.includes('model')) {
+                digests.push(layer.digest);
+              }
             }
+          }
+          if (model !== 'llamacpp' && modelBytes > 0) {
+            modelSizes.set(label, Math.max(modelSizes.get(label) || 0, modelBytes));
           }
           for (const digest of digests) {
             const key = String(digest).replace(':', '-').toLowerCase();
@@ -183,22 +195,31 @@ async function loadBlobModelMap(modelsRoots) {
       await walkManifests(modelsRoot);
     }
   }
+
+  let totalDiskBytes = 0;
+  for (const sz of uniqueBlobSizes.values()) totalDiskBytes += sz;
+  const installedModels = [...modelSizes.entries()]
+    .map(([name, sizeBytes]) => ({ name, sizeBytes }))
+    .sort((a, b) => b.sizeBytes - a.sizeBytes);
+
   cachedManifestKey = sig;
-  cachedBlobToModels = blobToModels;
-  return blobToModels;
+  cachedManifestData = { blobToModels, installedModels, totalDiskBytes };
+  return cachedManifestData;
 }
 
-// Parses Ollama server*.log files where llama-server reports prompt eval and eval token counts.
-async function readServerLog(file, blobToModels) {
+// Parses Ollama server*.log files using incremental byte-offset tailing when a log file grows.
+async function readServerLog(file, blobToModels, prior = null) {
   const stat = await fsp.stat(file);
-  const records = [];
-  let currentModel = 'unknown';
-  let currentTime = stat.mtimeMs;
+  const canTail = prior && stat.size > prior.size;
+  const startOffset = canTail ? prior.size : 0;
+  const records = canTail ? [...prior.records] : [];
+  let currentModel = canTail ? prior.lastModel : 'unknown';
+  let currentTime = canTail ? prior.lastTime : stat.mtimeMs;
   let pendingPrompt = 0;
   let pendingPromptMs = 0;
   let pendingPromptSig = '';
 
-  const input = fs.createReadStream(file, { encoding: 'utf8' });
+  const input = fs.createReadStream(file, { encoding: 'utf8', start: startOffset });
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
   try {
     for await (const line of lines) {
@@ -264,10 +285,10 @@ async function readServerLog(file, blobToModels) {
     lines.close();
     input.destroy();
   }
-  return records;
+  return { size: stat.size, mtimeMs: stat.mtimeMs, records, lastModel: currentModel, lastTime: currentTime };
 }
 
-function summarize(files, logFiles) {
+function summarize(files, logFiles, catalog) {
   const summary = {
     available: true,
     captureFiles: files.size + logFiles.size,
@@ -283,6 +304,8 @@ function summarize(files, logFiles) {
       totalEvalMs: 0,
       totalPromptEvalMs: 0,
       cloudEquivalentUsd: 0,
+      installedModelsCount: catalog?.installedModels?.length || 0,
+      totalDiskBytes: catalog?.totalDiskBytes || 0,
     },
   };
   const models = new Map();
@@ -349,6 +372,8 @@ function summarize(files, logFiles) {
     totalPromptEvalMs: Math.round(totalPromptMs),
     // Cloud equivalent savings vs standard $2/1M input + $8/1M output API rates.
     cloudEquivalentUsd: (summary.inputTokens * 2 + summary.outputTokens * 8) / 1e6,
+    installedModelsCount: catalog?.installedModels?.length || 0,
+    totalDiskBytes: catalog?.totalDiskBytes || 0,
   };
 
   summary.models = [...models.entries()].map(([name, tokens]) => ({ name, tokens })).sort((a, b) => b.tokens - a.tokens);
@@ -383,6 +408,28 @@ export async function readOllamaLiveStatus() {
   }
 }
 
+// Unloads all currently loaded models from Ollama GPU VRAM via local 127.0.0.1 API.
+export async function unloadOllamaVram() {
+  const status = await readOllamaLiveStatus();
+  if (!status.running || !status.models.length) {
+    return { unloaded: [], count: 0 };
+  }
+  const unloaded = [];
+  for (const m of status.models) {
+    try {
+      const res = await fetch('http://127.0.0.1:11434/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: m.name, keep_alive: 0 }),
+      });
+      if (res.ok) unloaded.push(m.name);
+    } catch {
+      // Ignore individual unload errors.
+    }
+  }
+  return { unloaded, count: unloaded.length };
+}
+
 export async function readLocalOllamaUsage() {
   if (cachedResult && Date.now() - cachedAt < CACHE_MS) return cachedResult;
   const directories = captureDirs();
@@ -414,8 +461,11 @@ export async function readLocalOllamaUsage() {
 
   const logDirs = defaultOllamaLogsDirs();
   const modelsDirs = defaultOllamaModelsDirs();
+  const catalog = logDirs.length || modelsDirs.length
+    ? await loadManifestCatalog(modelsDirs)
+    : { blobToModels: new Map(), installedModels: [], totalDiskBytes: 0 };
+
   if (logDirs.length) {
-    const blobToModels = await loadBlobModelMap(modelsDirs);
     const presentLogs = new Set();
     for (const logDir of logDirs) {
       let names;
@@ -432,8 +482,8 @@ export async function readLocalOllamaUsage() {
           const stat = await fsp.stat(file);
           const existing = cachedLogFiles.get(file);
           if (existing && existing.size === stat.size && existing.mtimeMs === stat.mtimeMs) return;
-          const records = await readServerLog(file, blobToModels);
-          cachedLogFiles.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, records });
+          const updated = await readServerLog(file, catalog.blobToModels, existing);
+          cachedLogFiles.set(file, updated);
         } catch {
           // A log file can be rotated while being read.
         }
@@ -451,7 +501,7 @@ export async function readLocalOllamaUsage() {
     return result;
   }
 
-  cachedResult = summarize(cachedFiles, cachedLogFiles);
+  cachedResult = summarize(cachedFiles, cachedLogFiles, catalog);
   cachedAt = Date.now();
   return cachedResult;
 }

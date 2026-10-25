@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Microsoft.Win32;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -12,6 +13,8 @@ namespace Aerus.UsageHud.Desktop;
 internal sealed class MainForm : Form
 {
     public const string WindowTitle = "Aerus AI Usage HUD";
+    private const string RunRegistryKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string RunValueName = "AerusAIUsageHUD";
 
     private static readonly string WebView2DownloadUrl = "https://developer.microsoft.com/microsoft-edge/webview2/";
 
@@ -49,6 +52,8 @@ internal sealed class MainForm : Form
 
     private Rectangle _normalBounds;
     private bool _miniMode;
+    private bool _minimizeToTrayOnClose;
+    private bool _allowExit;
 
     private static string ResolveDataRoot()
     {
@@ -79,8 +84,14 @@ internal sealed class MainForm : Form
         Controls.Add(_status);
         Controls.Add(_titleBar);
         Shown += async (_, _) => await StartAsync();
-        FormClosing += (_, _) =>
+        FormClosing += (_, args) =>
         {
+            if (!_allowExit && _minimizeToTrayOnClose && args.CloseReason == CloseReason.UserClosing)
+            {
+                args.Cancel = true;
+                Hide();
+                return;
+            }
             _tray.Visible = false;
             _tray.Dispose();
             _serverHost.Dispose();
@@ -237,8 +248,57 @@ internal sealed class MainForm : Form
         });
         menu.Items.Add("Toggle Always on Top", null, (_, _) => ToggleTopMost());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Exit Aerus HUD", null, (_, _) => Close());
+
+        var closeToTrayItem = new ToolStripMenuItem("Minimize to Tray on Close") { CheckOnClick = true, Checked = _minimizeToTrayOnClose };
+        closeToTrayItem.CheckedChanged += (_, _) => _minimizeToTrayOnClose = closeToTrayItem.Checked;
+        menu.Items.Add(closeToTrayItem);
+
+        var startupItem = new ToolStripMenuItem("Launch at Windows Sign-In") { CheckOnClick = true, Checked = IsStartupEnabled() };
+        startupItem.CheckedChanged += (_, _) => SetStartupEnabled(startupItem.Checked);
+        menu.Items.Add(startupItem);
+
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Exit Aerus HUD", null, (_, _) =>
+        {
+            _allowExit = true;
+            Close();
+        });
         _tray.ContextMenuStrip = menu;
+    }
+
+    private static bool IsStartupEnabled()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunRegistryKey, false);
+            return key?.GetValue(RunValueName) is string val && !string.IsNullOrWhiteSpace(val);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void SetStartupEnabled(bool enabled)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunRegistryKey, true);
+            if (key is null) return;
+            if (enabled)
+            {
+                var exe = Environment.ProcessPath;
+                if (!string.IsNullOrWhiteSpace(exe)) key.SetValue(RunValueName, $"\"{exe}\"");
+            }
+            else
+            {
+                key.DeleteValue(RunValueName, false);
+            }
+        }
+        catch
+        {
+            // Ignore registry permission errors.
+        }
     }
 
     private void RestoreWindow()
@@ -356,10 +416,21 @@ internal sealed class MainForm : Form
                 try
                 {
                     using var doc = JsonDocument.Parse(args.TryGetWebMessageAsString());
-                    if (doc.RootElement.TryGetProperty("type", out var typeProp) && typeProp.GetString() == "mini-hud")
+                    if (!doc.RootElement.TryGetProperty("type", out var typeProp)) return;
+                    var msgType = typeProp.GetString();
+                    if (msgType == "mini-hud")
                     {
                         var enabled = doc.RootElement.TryGetProperty("enabled", out var en) && en.GetBoolean();
                         BeginInvoke(() => SetMiniMode(enabled));
+                    }
+                    else if (msgType == "tray-stats")
+                    {
+                        var tip = doc.RootElement.TryGetProperty("tooltip", out var tp) ? tp.GetString() : null;
+                        if (!string.IsNullOrWhiteSpace(tip))
+                        {
+                            var safe = tip.Length > 63 ? tip[..63] : tip;
+                            BeginInvoke(() => _tray.Text = safe);
+                        }
                     }
                 }
                 catch

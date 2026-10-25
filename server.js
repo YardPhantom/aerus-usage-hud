@@ -8,10 +8,16 @@ import { fileURLToPath } from 'node:url';
 import { scanCodex, defaultCodexDir, defaultCodexExtraDirs } from './src/codex.js';
 import { scanClaude, defaultClaudeDir, defaultClaudeBackupDirs } from './src/claude.js';
 import { readAccountUsage } from './src/codex-account.js';
-import { readLocalOllamaUsage, readOllamaLiveStatus, defaultOllamaModelsDir, defaultOllamaLogsDirs } from './src/local-ollama.js';
+import {
+  readLocalOllamaUsage,
+  readOllamaLiveStatus,
+  unloadOllamaVram,
+  defaultOllamaModelsDir,
+  defaultOllamaLogsDirs,
+} from './src/local-ollama.js';
 import { loadStore, saveStore, recordSnapshot } from './src/account-store.js';
 import { computeCodexTotals, computeOllamaTotal, ollamaEvents } from './src/totals.js';
-import { buildView, RANGES } from './src/aggregate.js';
+import { buildView, inspectSession, RANGES } from './src/aggregate.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, 'public');
@@ -68,23 +74,37 @@ function clampOffset(raw) {
   return Math.min(0, Math.max(-3650, n));
 }
 
-async function usageFor(url) {
-  const requested = url.searchParams.get('range');
-  const range = RANGES.includes(requested) ? requested : 'today';
-  const offset = clampOffset(url.searchParams.get('offset'));
+async function gatherLocalEvents() {
   const claudeDir = defaultClaudeDir();
   const codexDir = defaultCodexDir();
-  const warnings = [];
-
   const [codex, claude, ollama, ollamaLive] = await Promise.all([
     scanCodex(codexDir),
     scanClaude({ claudeDir, dataDir: DATA_DIR }),
     readLocalOllamaUsage().catch(() => null),
     readOllamaLiveStatus().catch(() => ({ running: false, models: [] })),
   ]);
+  const ollamaUsage = ollamaEvents(ollama?.records ?? []);
+  return {
+    codexDir,
+    claudeDir,
+    codex,
+    claude,
+    ollama,
+    ollamaLive,
+    ollamaUsage,
+    events: [...codex.events, ...claude.events, ...ollamaUsage],
+  };
+}
+
+async function usageFor(url) {
+  const requested = url.searchParams.get('range');
+  const range = RANGES.includes(requested) ? requested : 'today';
+  const offset = clampOffset(url.searchParams.get('offset'));
+  const warnings = [];
+
+  const { codexDir, claudeDir, codex, claude, ollama, ollamaLive, ollamaUsage, events } = await gatherLocalEvents();
   if (!codex.found) warnings.push(`Codex history not found at ${codexDir}.`);
   if (!claude.found) warnings.push(`Claude Code logs not found at ${path.join(claudeDir, 'projects')}.`);
-  const ollamaUsage = ollamaEvents(ollama?.records ?? []);
 
   let allTime = null;
   if (range === 'all') {
@@ -110,12 +130,13 @@ async function usageFor(url) {
   }
 
   return buildView({
-    events: [...codex.events, ...claude.events, ...ollamaUsage],
+    events,
     range,
     offset,
     allTime,
     warnings,
     ollamaLive,
+    ollamaCatalog: ollama?.telemetry || null,
     sources: {
       codex: { found: codex.found, files: codex.files },
       claude: { found: claude.found, files: claude.files, records: claude.ledgerRecords },
@@ -184,6 +205,33 @@ function createServer() {
         send(response, 200, JSON.stringify(await usageFor(url)), 'application/json; charset=utf-8');
       } catch (error) {
         send(response, 500, JSON.stringify({ error: 'Unable to scan local usage.', detail: error.message }), 'application/json; charset=utf-8');
+      }
+      return;
+    }
+
+    if (url.pathname === '/api/session') {
+      try {
+        const provider = url.searchParams.get('provider') || '';
+        const sessionId = url.searchParams.get('sessionId') || '';
+        const { events } = await gatherLocalEvents();
+        const details = inspectSession(events, provider, sessionId);
+        if (!details) {
+          send(response, 404, JSON.stringify({ error: 'Session not found.' }), 'application/json; charset=utf-8');
+          return;
+        }
+        send(response, 200, JSON.stringify(details), 'application/json; charset=utf-8');
+      } catch (error) {
+        send(response, 500, JSON.stringify({ error: 'Unable to inspect session.', detail: error.message }), 'application/json; charset=utf-8');
+      }
+      return;
+    }
+
+    if (url.pathname === '/api/ollama/unload' && request.method === 'POST') {
+      try {
+        const result = await unloadOllamaVram();
+        send(response, 200, JSON.stringify(result), 'application/json; charset=utf-8');
+      } catch (error) {
+        send(response, 500, JSON.stringify({ error: 'Unable to unload Ollama VRAM.', detail: error.message }), 'application/json; charset=utf-8');
       }
       return;
     }

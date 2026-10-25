@@ -5,9 +5,11 @@ const state = {
   data: null,
   showAll: false,
   breakdownMode: 'models', // 'models' | 'projects'
+  chartMode: 'bars', // 'bars' | 'heatmap'
   filter: null, // { type: 'provider' | 'model' | 'project', provider?: string, value: string }
   search: '',
   miniHud: false,
+  dailyBudgetUsd: Number(localStorage.getItem('aerus_daily_budget_usd')) || 0,
   requestId: 0,
   lastLoad: 0,
 };
@@ -62,6 +64,13 @@ function formatBytesGb(bytes) {
   return `${(b / (1024 ** 3)).toFixed(1)} GB`;
 }
 
+function formatHour(hour) {
+  if (hour == null) return '';
+  const suffix = hour >= 12 ? 'PM' : 'AM';
+  const h12 = hour % 12 || 12;
+  return `${h12}:00 ${suffix}`;
+}
+
 function setText(selector, value, root = document) {
   const el = $(selector, root);
   if (el) el.textContent = value;
@@ -75,9 +84,11 @@ function syncControls() {
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', String(active));
   });
-  $$('.mini-tab').forEach((tab) => {
-    const active = tab.dataset.breakdown === state.breakdownMode;
-    tab.classList.toggle('active', active);
+  $$('[data-breakdown]').forEach((tab) => {
+    tab.classList.toggle('active', tab.dataset.breakdown === state.breakdownMode);
+  });
+  $$('[data-chart-mode]').forEach((tab) => {
+    tab.classList.toggle('active', tab.dataset.chartMode === state.chartMode);
   });
   $$('.clickable-card').forEach((card) => {
     const pf = card.dataset.providerFilter || '';
@@ -103,6 +114,7 @@ async function load() {
     state.data = data;
     state.lastLoad = Date.now();
     render();
+    postTrayStats(data);
   } catch (error) {
     if (requestId !== state.requestId) return;
     showBanner([`Could not read local usage: ${error.message}. Keep this window open and try Refresh.`]);
@@ -118,6 +130,13 @@ function setBusy(busy) {
   $('.hud').classList.toggle('loading', busy && !state.data);
 }
 
+function postTrayStats(d) {
+  try {
+    const tooltip = `Aerus HUD · ${d.label}: ${compact(d.totals.total)} tok (${money(d.totals.cost)})`;
+    window.chrome?.webview?.postMessage(JSON.stringify({ type: 'tray-stats', tooltip }));
+  } catch {}
+}
+
 // Rendering ----------------------------------------------------------------
 
 function render() {
@@ -130,7 +149,7 @@ function render() {
   showBanner(d.warnings || []);
   renderKpis(d);
   renderDonut(d);
-  renderChart(d);
+  renderChartOrHeatmap(d);
   renderCost(d);
   renderSessions(d);
   renderBreakdown(d);
@@ -225,7 +244,6 @@ function fillCard(card, totals, cacheAvailable = true) {
   }
 }
 
-// a is the All Time block: { codex: { snapshot }, lookup: { status } }.
 function accountStatus(a) {
   const snapshot = a.codex.snapshot;
   if (!snapshot) return ' · No account total yet';
@@ -261,6 +279,12 @@ function renderKpis(d) {
   setText('#claude-note', claudeNote);
 
   const ollamaTel = d.efficiency?.ollamaTelemetry;
+  const activeModels = ollamaTel?.live?.models || [];
+  const unloadBtn = $('#unload-vram');
+  if (unloadBtn) {
+    unloadBtn.hidden = activeModels.length === 0;
+  }
+
   const ollamaParts = [];
   if (d.sources.ollama?.found) {
     ollamaParts.push(`${n(d.providers.ollama.sessions)} sessions`);
@@ -269,13 +293,15 @@ function renderKpis(d) {
     }
     const computeTime = formatDurationMs((ollamaTel?.totalEvalMs || 0) + (ollamaTel?.totalPromptEvalMs || 0));
     if (computeTime) ollamaParts.push(`${computeTime} GPU eval`);
-    const activeModels = ollamaTel?.live?.models || [];
+    if (ollamaTel?.totalDiskBytes > 0) {
+      ollamaParts.push(`${ollamaTel.installedModelsCount} models (${formatBytesGb(ollamaTel.totalDiskBytes)} on disk)`);
+    }
     if (activeModels.length) {
       const m = activeModels[0];
       const vram = formatBytesGb(m.sizeVramBytes || m.sizeBytes);
       const quant = m.quantization ? ` · ${m.quantization}` : '';
       ollamaParts.push(`VRAM: ${m.name}${vram ? ` (${vram}${quant})` : ''}`);
-    } else {
+    } else if (!ollamaTel?.totalDiskBytes) {
       ollamaParts.push('Local / self-hosted');
     }
   } else {
@@ -312,6 +338,45 @@ function axisLabel(granularity, key) {
     : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+function renderChartOrHeatmap(d) {
+  const act = d.activity;
+  if (act) {
+    const parts = [];
+    if (act.currentStreakDays > 0) parts.push(`${act.currentStreakDays}d active streak (best ${act.longestStreakDays}d)`);
+    if (act.peakDay) parts.push(`Peak day: ${act.peakDay.label} (${compact(act.peakDay.total)})`);
+    if (act.busiestHour != null) parts.push(`Peak hour: ${formatHour(act.busiestHour)}`);
+    setText('#activity-strip', parts.join(' · '));
+  }
+
+  const chartEl = $('#chart');
+  const heatEl = $('#heatmap-wrap');
+  if (state.chartMode === 'heatmap' && act?.heatmap) {
+    chartEl.hidden = true;
+    heatEl.hidden = false;
+    renderHeatmap(act.heatmap, heatEl);
+  } else {
+    chartEl.hidden = false;
+    heatEl.hidden = true;
+    renderChart(d);
+  }
+}
+
+function renderHeatmap(heatmap, container) {
+  const max = Math.max(1, ...heatmap.map((cell) => cell.total));
+  const cells = heatmap
+    .map((cell) => {
+      const dateStr = new Date(cell.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      if (!cell.total) {
+        return `<i class="heat-cell empty" title="${esc(dateStr)}: 0 tokens"></i>`;
+      }
+      const ratio = Math.min(1, Math.max(0.22, Math.log10(cell.total + 1) / Math.log10(max + 1)));
+      const label = PROVIDER_META[cell.dominant]?.label || 'Mixed';
+      return `<i class="heat-cell dom-${esc(cell.dominant)}" style="opacity:${ratio.toFixed(2)}" title="${esc(dateStr)} · ${esc(compact(cell.total))} tokens (${esc(label)} dominant)"></i>`;
+    })
+    .join('');
+  container.innerHTML = `<div class="heatmap-grid">${cells}</div><div class="heatmap-caption">Last 52 weeks (364 days) · colored by each day's dominant provider</div>`;
+}
+
 function renderChart(d) {
   const { granularity, labels } = d.series;
   const chart = $('#chart');
@@ -324,7 +389,6 @@ function renderChart(d) {
     .map((_, i) => {
       const tot = totals[i];
       const height = (tot / max) * 100;
-      // Stacked bottom to top: Codex, Claude, Ollama.
       const parts = PROVIDERS.map((p) => {
         const share = tot ? (d.series[p][i] / tot) * 100 : 0;
         return `<i class="c-${p}" style="height:${share}%"></i>`;
@@ -367,7 +431,11 @@ function renderCost(d) {
     `${compact(d.providers.ollama.total)} tokens · Local${ollamaEq > 0.01 ? ` (~${money(ollamaEq)} cloud API saved)` : ' / no API cost'}`,
   );
 
-  setText('[data-cost-tokens="grand"]', `~ ${compact(d.totals.total)} tokens`);
+  const dailyBurn = d.efficiency?.dailyBurnUsd || 0;
+  setText(
+    '[data-cost-tokens="grand"]',
+    `~ ${compact(d.totals.total)} tokens${dailyBurn >= 0.01 ? ` · ${money(dailyBurn)}/day avg` : ''}`,
+  );
 
   const pill = $('#cache-savings-pill');
   if (pill) {
@@ -378,6 +446,33 @@ function renderCost(d) {
       pill.hidden = false;
     } else {
       pill.hidden = true;
+    }
+  }
+
+  // Subscription ROI note ($200/mo Max plan reference).
+  const projMonthly = d.efficiency?.projectedMonthlyUsd || 0;
+  if (projMonthly >= 20) {
+    const mult = (projMonthly / 200).toFixed(1);
+    setText('#roi-note', `Pace: ~${money(projMonthly)}/30d API equivalent (${mult}× a $200/mo Max subscription).`);
+  } else {
+    setText('#roi-note', '');
+  }
+
+  // Daily budget bar.
+  const budgetWrap = $('#budget-bar-wrap');
+  if (budgetWrap) {
+    if (state.dailyBudgetUsd > 0) {
+      budgetWrap.hidden = false;
+      const pct = Math.min(100, (dailyBurn / state.dailyBudgetUsd) * 100);
+      setText('#budget-label-left', `Daily pace: ${money(dailyBurn)} / ${money(state.dailyBudgetUsd)} target`);
+      setText('#budget-label-right', `${pct.toFixed(0)}%`);
+      const fill = $('#budget-fill');
+      if (fill) {
+        fill.style.width = `${pct}%`;
+        fill.classList.toggle('over-budget', dailyBurn > state.dailyBudgetUsd);
+      }
+    } else {
+      budgetWrap.hidden = true;
     }
   }
 }
@@ -431,10 +526,11 @@ function renderSessions(d) {
           ? '<span class="na" title="Ollama captures do not record cache tokens">Unavailable</span>'
           : n(s.cache);
         const speedBadge = s.tokensPerSec > 0 ? `<span class="speed-tag" title="Average generation throughput">${s.tokensPerSec} tok/s</span>` : '';
-        return `<tr>
+        const turnsBadge = s.turnCount > 1 ? `<span class="sess-id">(${s.turnCount} turns)</span>` : '';
+        return `<tr class="session-row" data-session-provider="${esc(s.provider)}" data-session-id="${esc(s.sessionId)}" title="Click to inspect turn-by-turn timeline">
           <td class="num">${i + 1}</td>
           <td><span class="prov ${s.provider}"><span class="badge ${s.provider}-badge">${meta.letter}</span>${meta.label}</span></td>
-          <td><span class="sess-name">${esc(s.project)}</span><span class="sess-id">${esc(shortId(s.sessionId))}</span></td>
+          <td><span class="sess-name">${esc(s.project)}</span><span class="sess-id">${esc(shortId(s.sessionId))}</span>${turnsBadge}</td>
           <td>${esc(s.model)}${speedBadge}</td>
           <td>${esc(stamp(s.at))}</td>
           <td class="num">${n(s.input)}</td>
@@ -447,6 +543,67 @@ function renderSessions(d) {
   }
   const toggle = $('#toggle-sessions');
   toggle.hidden = filtered.length <= 8;
+}
+
+// Session Deep-Inspector Modal ---------------------------------------------
+
+async function openSessionInspector(provider, sessionId) {
+  const modal = $('#session-modal');
+  if (!modal) return;
+  modal.hidden = false;
+  setText('#modal-title', 'Loading session…');
+  setText('#modal-subtitle', `${provider} · ${sessionId}`);
+  $('#modal-kpis').innerHTML = '';
+  $('#modal-timeline').innerHTML = '';
+  $('#modal-turns').innerHTML = '';
+
+  try {
+    const res = await fetch(`/api/session?provider=${encodeURIComponent(provider)}&sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const s = await res.json();
+    const meta = PROVIDER_META[s.provider] || { label: s.provider };
+    setText('#modal-title', `${meta.label} · ${s.project}`);
+    const duration = formatDurationMs(s.endedAt - s.startedAt) || '<1s';
+    setText('#modal-subtitle', `Session ${s.sessionId} · ${s.turnCount} turn${s.turnCount === 1 ? '' : 's'} · Span ${duration} · Model ${s.model}`);
+
+    const hitText = s.cacheHitRate != null ? `${(s.cacheHitRate * 100).toFixed(1)}%` : 'N/A';
+    $('#modal-kpis').innerHTML = `
+      <div class="modal-kpi"><span>Total Tokens</span><b>${n(s.totals.total)}</b></div>
+      <div class="modal-kpi"><span>Fresh Input</span><b>${n(s.totals.input)}</b></div>
+      <div class="modal-kpi"><span>Cache Read</span><b>${s.cacheKnown ? n(s.totals.cacheRead) : 'N/A'}</b></div>
+      <div class="modal-kpi"><span>Output</span><b>${n(s.totals.output)}</b></div>
+      <div class="modal-kpi"><span>Cache Hit %</span><b>${esc(hitText)}</b></div>
+      <div class="modal-kpi"><span>Est. API Cost</span><b>${money(s.totals.cost)}</b></div>
+    `;
+
+    const maxTurn = Math.max(1, ...s.turns.map((t) => t.total));
+    const bars = s.turns
+      .slice(-80)
+      .map((t) => {
+        const h = (t.total / maxTurn) * 100;
+        return `<div class="turn-col" title="Turn #${t.turn} (${stamp(t.at)}): ${n(t.total)} tokens"><i class="c-${esc(s.provider)}" style="height:${Math.max(4, h)}%"></i></div>`;
+      })
+      .join('');
+    $('#modal-timeline').innerHTML = `<div class="turn-bars">${bars}</div>`;
+
+    $('#modal-turns').innerHTML = s.turns
+      .map(
+        (t) => `<tr>
+          <td class="num">${t.turn}</td>
+          <td>${esc(stamp(t.at))}</td>
+          <td>${esc(t.model)}${t.tokensPerSec > 0 ? `<span class="speed-tag">${t.tokensPerSec} tok/s</span>` : ''}</td>
+          <td class="num">${n(t.input)}</td>
+          <td class="num">${s.cacheKnown ? n(t.cacheRead) : '<span class="na">N/A</span>'}</td>
+          <td class="num">${n(t.output)}</td>
+          <td class="num total">${n(t.total)}</td>
+          <td class="num">${compact(t.cumulativeTotal)}</td>
+        </tr>`,
+      )
+      .join('');
+  } catch (err) {
+    setText('#modal-title', 'Could not inspect session');
+    setText('#modal-subtitle', err.message);
+  }
 }
 
 function footerText(d) {
@@ -486,7 +643,7 @@ function downloadBlob(filename, content, mimeType) {
 function exportSessionsCsv() {
   if (!state.data) return;
   const rows = getFilteredSessions(state.data);
-  const headers = ['provider', 'project', 'sessionId', 'model', 'timestamp', 'input', 'output', 'cache', 'total', 'costUsd', 'tokensPerSec'];
+  const headers = ['provider', 'project', 'sessionId', 'model', 'timestamp', 'turns', 'input', 'output', 'cache', 'total', 'costUsd', 'tokensPerSec'];
   const csvCell = (val) => {
     const str = String(val ?? '');
     return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
@@ -500,6 +657,7 @@ function exportSessionsCsv() {
         r.sessionId,
         r.model,
         new Date(r.at).toISOString(),
+        r.turnCount || 1,
         r.input,
         r.output,
         r.cache ?? '',
@@ -525,6 +683,7 @@ function exportSessionsJson() {
     totals: state.data.totals,
     providers: state.data.providers,
     efficiency: state.data.efficiency,
+    activity: state.data.activity,
     sessions: rows,
   };
   downloadBlob(`aerus-usage-${state.range}.json`, JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
@@ -610,15 +769,23 @@ function wire() {
       load();
     }),
   );
-  $$('.mini-tab').forEach((tab) =>
+  $$('[data-breakdown]').forEach((tab) =>
     tab.addEventListener('click', () => {
       state.breakdownMode = tab.dataset.breakdown;
       syncControls();
       if (state.data) renderBreakdown(state.data);
     }),
   );
+  $$('[data-chart-mode]').forEach((tab) =>
+    tab.addEventListener('click', () => {
+      state.chartMode = tab.dataset.chartMode;
+      syncControls();
+      if (state.data) renderChartOrHeatmap(state.data);
+    }),
+  );
   $$('.clickable-card').forEach((card) =>
-    card.addEventListener('click', () => {
+    card.addEventListener('click', (event) => {
+      if (event.target.closest('#unload-vram')) return;
       const pf = card.dataset.providerFilter || '';
       if (!pf || (state.filter?.type === 'provider' && state.filter.value === pf)) {
         state.filter = null;
@@ -632,6 +799,27 @@ function wire() {
       }
     }),
   );
+  $('#unload-vram')?.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const btn = $('#unload-vram');
+    btn.disabled = true;
+    btn.textContent = 'Unloading…';
+    try {
+      await fetch('/api/ollama/unload', { method: 'POST' });
+      await load();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Free VRAM';
+    }
+  });
+  $('#budget-btn')?.addEventListener('click', () => {
+    const input = window.prompt('Set soft daily API cost target in USD (0 to disable):', String(state.dailyBudgetUsd || 25));
+    if (input === null) return;
+    const val = Math.max(0, Number(input) || 0);
+    state.dailyBudgetUsd = val;
+    localStorage.setItem('aerus_daily_budget_usd', String(val));
+    if (state.data) renderCost(state.data);
+  });
   $('#model-bars').addEventListener('click', (event) => {
     const row = event.target.closest('.model-row');
     if (!row || !row.dataset.filterValue) return;
@@ -648,6 +836,22 @@ function wire() {
     if (state.data) {
       renderBreakdown(state.data);
       renderSessions(state.data);
+    }
+  });
+  $('#sessions').addEventListener('click', (event) => {
+    const row = event.target.closest('.session-row');
+    if (!row) return;
+    openSessionInspector(row.dataset.sessionProvider, row.dataset.sessionId);
+  });
+  $('#close-modal')?.addEventListener('click', () => {
+    $('#session-modal').hidden = true;
+  });
+  $('#session-modal')?.addEventListener('click', (event) => {
+    if (event.target.id === 'session-modal') $('#session-modal').hidden = true;
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && $('#session-modal') && !$('#session-modal').hidden) {
+      $('#session-modal').hidden = true;
     }
   });
   $('#active-filter')?.addEventListener('click', () => {
@@ -683,7 +887,6 @@ function wire() {
   wireTooltip();
   connectLiveStream();
 
-  // Refresh when the window comes back into view, and once a minute while it stays open.
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden && Date.now() - state.lastLoad > 30_000) load();
   });
