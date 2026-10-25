@@ -64,6 +64,11 @@ export async function listJsonl(dir, depth = 0) {
   return found;
 }
 
+export function normalizePathKey(targetPath) {
+  const resolved = path.resolve(String(targetPath || ''));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 // Discovers mounted drive roots (Windows C:\..Z:\ or custom AERUS_DRIVES) for secondary storage scanning.
 export function listAvailableDrives() {
   const custom = process.env.AERUS_DRIVES;
@@ -87,4 +92,42 @@ export function listAvailableDrives() {
     }
   }
   return drives;
+}
+
+// Deduplicates and discovers existing directories across seed paths and mounted drive relative paths.
+export function discoverDriveDirs(relativeCandidates = [], { preSeeds = [], postSeeds = [] } = {}) {
+  const results = [];
+  const seen = new Set();
+
+  const tryAdd = (candidate) => {
+    if (!candidate) return;
+    const key = normalizePathKey(candidate);
+    if (seen.has(key)) return;
+    try {
+      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isDirectory()) return;
+      const canonical = typeof fs.realpathSync?.native === 'function' ? fs.realpathSync.native(candidate) : candidate;
+      const canonicalKey = normalizePathKey(canonical);
+      if (seen.has(canonicalKey)) return;
+      seen.add(key);
+      seen.add(canonicalKey);
+      results.push(canonical);
+    } catch {
+      // Inaccessible path.
+    }
+  };
+
+  for (const seed of preSeeds) tryAdd(seed);
+  for (const drive of listAvailableDrives()) {
+    for (const rel of relativeCandidates) {
+      tryAdd(path.join(drive, ...rel));
+    }
+  }
+  for (const seed of postSeeds) tryAdd(seed);
+  return results;
+}
+
+export function pruneMapKeys(map, activeKeys) {
+  for (const key of map.keys()) {
+    if (!activeKeys.has(key)) map.delete(key);
+  }
 }

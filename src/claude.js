@@ -12,7 +12,17 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { claudeCost } from './pricing.js';
-import { isDirectory, listAvailableDrives, listJsonl, normalizeModel, num, parseTime, projectFromCwd } from './util.js';
+import {
+  discoverDriveDirs,
+  isDirectory,
+  listJsonl,
+  normalizeModel,
+  normalizePathKey,
+  num,
+  parseTime,
+  projectFromCwd,
+  pruneMapKeys,
+} from './util.js';
 
 const LEDGER_VERSION = 1;
 
@@ -27,23 +37,14 @@ export function defaultClaudeBackupDirs() {
   if (custom) return custom.split(path.delimiter).map((d) => d.trim()).filter(Boolean);
   if (process.env.AERUS_CLAUDE_DIR || process.env.CLAUDE_CONFIG_DIR) return [];
 
-  const candidates = [];
-  for (const drive of listAvailableDrives()) {
-    for (const rel of [
-      ['Backups', 'claude-transcripts'],
-      ['backups', 'claude-transcripts'],
-      ['Claude', 'projects'],
-      ['Claude'],
-      ['.claude', 'projects'],
-      ['.claude'],
-    ]) {
-      const full = path.join(drive, ...rel);
-      if (!candidates.includes(full) && fs.existsSync(full)) {
-        candidates.push(full);
-      }
-    }
-  }
-  return candidates;
+  return discoverDriveDirs([
+    ['Backups', 'claude-transcripts'],
+    ['backups', 'claude-transcripts'],
+    ['Claude', 'projects'],
+    ['Claude'],
+    ['.claude', 'projects'],
+    ['.claude'],
+  ]);
 }
 
 // Scans run one at a time, so two open tabs cannot write the ledger at the same time.
@@ -57,45 +58,48 @@ export function scanClaude(options) {
 
 const fileCache = new Map();
 
-async function resolveProjectScanDirs(claudeDir, backupDirs) {
-  const dirs = [];
-  const seen = new Set();
-  const addDir = (dir) => {
-    const norm = path.resolve(dir).toLowerCase();
-    if (!seen.has(norm)) {
-      seen.add(norm);
-      dirs.push(dir);
+// Collects both the active scan directories and their .jsonl files in a single pass.
+async function collectProjectFiles(claudeDir, backupDirs) {
+  const scanDirs = [];
+  const files = [];
+  const seenDirs = new Set();
+  const seenFiles = new Set();
+
+  const scanCandidate = async (candidate) => {
+    const sub = path.join(candidate, 'projects');
+    const target = (await isDirectory(sub)) ? sub : (await isDirectory(candidate)) ? candidate : null;
+    if (!target) return;
+    const dirKey = normalizePathKey(target);
+    if (seenDirs.has(dirKey)) return;
+
+    const foundFiles = await listJsonl(target);
+    if (target === sub || foundFiles.length > 0) {
+      seenDirs.add(dirKey);
+      scanDirs.push(target);
+      for (const file of foundFiles) {
+        const fileKey = normalizePathKey(file);
+        if (!seenFiles.has(fileKey)) {
+          seenFiles.add(fileKey);
+          files.push(file);
+        }
+      }
     }
   };
 
-  const primary = path.join(claudeDir, 'projects');
-  if (await isDirectory(primary)) addDir(primary);
-  else if (await isDirectory(claudeDir)) {
-    const direct = await listJsonl(claudeDir, 7);
-    if (direct.length) addDir(claudeDir);
-  }
+  await scanCandidate(claudeDir);
   for (const extra of backupDirs) {
-    const sub = path.join(extra, 'projects');
-    if (await isDirectory(sub)) {
-      addDir(sub);
-    } else if (await isDirectory(extra)) {
-      const hasJsonl = await listJsonl(extra, 7);
-      if (hasJsonl.length) addDir(extra);
-    }
+    await scanCandidate(extra);
   }
-  return dirs;
+  return { scanDirs, files };
 }
 
 async function scanClaudeNow({ claudeDir = defaultClaudeDir(), backupDirs = null, dataDir } = {}) {
   const extraDirs = backupDirs ?? (claudeDir === defaultClaudeDir() ? defaultClaudeBackupDirs() : []);
-  const scanDirs = await resolveProjectScanDirs(claudeDir, extraDirs);
+  const { scanDirs, files } = await collectProjectFiles(claudeDir, extraDirs);
   const found = scanDirs.length > 0;
   const ledgerFile = path.join(dataDir, 'claude-ledger.json');
   const ledger = await loadLedger(ledgerFile);
-  const files = [];
-  for (const dir of scanDirs) {
-    files.push(...(await listJsonl(dir)));
-  }
+  const presentFiles = new Set(files);
 
   let changed = false;
   for (const file of files) {
@@ -103,6 +107,7 @@ async function scanClaudeNow({ claudeDir = defaultClaudeDir(), backupDirs = null
       if (mergeRecord(ledger.records, rec)) changed = true;
     }
   }
+  pruneMapKeys(fileCache, presentFiles);
   if (changed) await saveLedger(ledgerFile, ledger);
 
   const events = Object.values(ledger.records).map(toEvent);

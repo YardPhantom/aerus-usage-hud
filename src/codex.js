@@ -8,7 +8,16 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { codexCost } from './pricing.js';
-import { isDirectory, listAvailableDrives, listJsonl, normalizeModel, num, parseTime, projectFromCwd } from './util.js';
+import {
+  discoverDriveDirs,
+  isDirectory,
+  listJsonl,
+  normalizeModel,
+  num,
+  parseTime,
+  projectFromCwd,
+  pruneMapKeys,
+} from './util.js';
 
 export function defaultCodexDir() {
   return process.env.AERUS_CODEX_DIR || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
@@ -16,16 +25,12 @@ export function defaultCodexDir() {
 
 export function defaultCodexExtraDirs() {
   if (process.env.AERUS_CODEX_DIR || process.env.CODEX_HOME) return [];
-  const candidates = [];
-  for (const drive of listAvailableDrives()) {
-    for (const rel of [['.codex'], ['Codex'], ['codex'], ['Backups', 'codex-sessions']]) {
-      const full = path.join(drive, ...rel);
-      if (!candidates.includes(full) && fs.existsSync(full)) {
-        candidates.push(full);
-      }
-    }
-  }
-  return candidates;
+  return discoverDriveDirs([
+    ['.codex'],
+    ['Codex'],
+    ['codex'],
+    ['Backups', 'codex-sessions'],
+  ]);
 }
 
 // Parsed file results, keyed by path, so unchanged sessions are not re-read on every open.
@@ -46,8 +51,12 @@ export async function scanCodex(codexDir = defaultCodexDir()) {
       );
     }
   }
-  if (!anyFound) return { found: false, files: 0, events: [] };
+  if (!anyFound) {
+    fileCache.clear();
+    return { found: false, files: 0, events: [] };
+  }
 
+  const presentFiles = new Set(files);
   const seenSessions = new Set();
   const events = [];
 
@@ -69,6 +78,7 @@ export async function scanCodex(codexDir = defaultCodexDir()) {
     seenSessions.add(cached.session.sessionId);
     events.push(...cached.session.events);
   }
+  pruneMapKeys(fileCache, presentFiles);
   return { found: anyFound, files: files.length, events };
 }
 

@@ -3,13 +3,15 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
-import { listAvailableDrives } from './util.js';
+import { discoverDriveDirs, pruneMapKeys } from './util.js';
 
 const RAW_CAPTURE_SUFFIX = 'RAW-UPSTREAM-SSE.txt';
 const SERVER_LOG_PATTERN = /^server(-\d+)?\.log$/i;
 const CACHE_MS = 10_000;
-let cachedFiles = new Map();
-let cachedLogFiles = new Map();
+const cachedFiles = new Map();
+const cachedLogFiles = new Map();
+let cachedManifestKey = '';
+let cachedBlobToModels = new Map();
 let cachedAt = 0;
 let cachedResult = null;
 
@@ -20,46 +22,36 @@ function homeDir() {
 function captureDirs() {
   if (process.env.AERU_OLLAMA_CAPTURE_DIR) return [process.env.AERU_OLLAMA_CAPTURE_DIR];
   const codexHome = process.env.CODEX_HOME || path.join(homeDir(), '.codex');
-  const dirs = [path.join(codexHome, 'local14b-tool-adapter', 'captures')];
-  if (!process.env.CODEX_HOME) {
-    for (const drive of listAvailableDrives()) {
-      for (const rel of [
-        ['.codex', 'local14b-tool-adapter', 'captures'],
-        ['Codex', 'local14b-tool-adapter', 'captures'],
-        ['Ollama', 'captures'],
-        ['OllamaModels', 'captures'],
-      ]) {
-        const candidate = path.join(drive, ...rel);
-        if (!dirs.includes(candidate) && fs.existsSync(candidate)) dirs.push(candidate);
-      }
-    }
-  }
-  return dirs;
+  const primary = path.join(codexHome, 'local14b-tool-adapter', 'captures');
+  if (process.env.CODEX_HOME) return [primary];
+
+  const extra = discoverDriveDirs([
+    ['.codex', 'local14b-tool-adapter', 'captures'],
+    ['Codex', 'local14b-tool-adapter', 'captures'],
+    ['Ollama', 'captures'],
+    ['OllamaModels', 'captures'],
+  ]);
+  return [primary, ...extra.filter((d) => d.toLowerCase() !== primary.toLowerCase())];
 }
 
 export function defaultOllamaModelsDirs() {
   if (process.env.AERUS_OLLAMA_MODELS_DIR) {
     return process.env.AERUS_OLLAMA_MODELS_DIR.split(path.delimiter).map((d) => d.trim()).filter(Boolean);
   }
-  const dirs = [];
-  const add = (dir) => {
-    if (dir && !dirs.includes(dir) && fs.existsSync(dir)) dirs.push(dir);
-  };
-  if (process.env.OLLAMA_MODELS) add(process.env.OLLAMA_MODELS);
-  for (const drive of listAvailableDrives()) {
-    for (const rel of [
+  return discoverDriveDirs(
+    [
       ['OllamaModels'],
       ['ollama-models'],
       ['Ollama', 'models'],
       ['ollama', 'models'],
       ['.ollama', 'models'],
       ['models', 'ollama'],
-    ]) {
-      add(path.join(drive, ...rel));
-    }
-  }
-  add(path.join(homeDir(), '.ollama', 'models'));
-  return dirs;
+    ],
+    {
+      preSeeds: process.env.OLLAMA_MODELS ? [process.env.OLLAMA_MODELS] : [],
+      postSeeds: [path.join(homeDir(), '.ollama', 'models')],
+    },
+  );
 }
 
 export function defaultOllamaModelsDir() {
@@ -73,14 +65,9 @@ export function defaultOllamaLogsDirs() {
   if (custom) return custom.split(path.delimiter).map((d) => d.trim()).filter(Boolean);
   if (process.env.AERU_OLLAMA_CAPTURE_DIR) return [];
 
-  const dirs = [];
-  const add = (dir) => {
-    if (dir && !dirs.includes(dir) && fs.existsSync(dir)) dirs.push(dir);
-  };
   const localAppData = process.env.LOCALAPPDATA || (process.platform === 'win32' ? path.join(homeDir(), 'AppData', 'Local') : '');
-  if (localAppData) add(path.join(localAppData, 'Ollama'));
-  for (const drive of listAvailableDrives()) {
-    for (const rel of [
+  return discoverDriveDirs(
+    [
       ['Ollama', 'logs'],
       ['Ollama'],
       ['OllamaModels', 'logs'],
@@ -88,11 +75,9 @@ export function defaultOllamaLogsDirs() {
       ['ollama-models', 'logs'],
       ['.ollama', 'logs'],
       ['.ollama'],
-    ]) {
-      add(path.join(drive, ...rel));
-    }
-  }
-  return dirs;
+    ],
+    { preSeeds: localAppData ? [path.join(localAppData, 'Ollama')] : [] },
+  );
 }
 
 function number(value) {
@@ -149,6 +134,18 @@ async function readCapture(file, name) {
 
 // Maps blob sha256-<hash> identifiers across all discovered Ollama model roots to human-readable model names.
 async function loadBlobModelMap(modelsRoots) {
+  const sigParts = [];
+  for (const root of modelsRoots) {
+    try {
+      const st = await fsp.stat(path.join(root, 'manifests')).catch(() => fsp.stat(root));
+      sigParts.push(`${root}:${st.mtimeMs}`);
+    } catch {
+      sigParts.push(`${root}:0`);
+    }
+  }
+  const sig = sigParts.join('|');
+  if (sig && sig === cachedManifestKey) return cachedBlobToModels;
+
   const blobToModels = new Map();
   async function walkManifests(dir, relParts = []) {
     let entries;
@@ -199,6 +196,8 @@ async function loadBlobModelMap(modelsRoots) {
       await walkManifests(modelsRoot);
     }
   }
+  cachedManifestKey = sig;
+  cachedBlobToModels = blobToModels;
   return blobToModels;
 }
 
@@ -432,9 +431,7 @@ export async function readLocalOllamaUsage() {
       // Directory not present.
     }
   }
-  for (const key of cachedFiles.keys()) {
-    if (!presentCaptures.has(key)) cachedFiles.delete(key);
-  }
+  pruneMapKeys(cachedFiles, presentCaptures);
 
   const logDirs = defaultOllamaLogsDirs();
   const modelsDirs = defaultOllamaModelsDirs();
@@ -463,9 +460,7 @@ export async function readLocalOllamaUsage() {
         }
       }));
     }
-    for (const file of cachedLogFiles.keys()) {
-      if (!presentLogs.has(file)) cachedLogFiles.delete(file);
-    }
+    pruneMapKeys(cachedLogFiles, presentLogs);
   } else {
     cachedLogFiles.clear();
   }
